@@ -72,6 +72,8 @@ QuickTime Player or IINA; code opens at its line in your chosen editor.
   lazily. Thumbnail and preview caches have 12 MiB and 48 MiB cost budgets, share duplicate
   requests, and each allow at most four image renders at a time. Cache clearing prevents old renders from refilling
   them. `NSCache` budgets are eviction hints, not a cap on the app's total memory.
+- Changing a kind filter reuses the query vector, scored candidates and bounded result-page cache. File/segment
+  metadata and keyword coverage are read in batches, and index writes invalidate cached search results.
 - New files are indexed incrementally. Bulk indexing respects thermal state, Low Power Mode, your battery preference
   and optional indexing hours.
 
@@ -143,6 +145,17 @@ creation require macOS. Swift syntax and shell scripts can be checked there.
 `Sources/DigUpApp` contains the native interface; `Sources/DigUpKit` contains crawling, extraction, storage and search.
 Its `Platform` folder uses Apple frameworks directly. `Sources/LlamaRuntime` bridges the pinned llama.cpp build.
 `Sources/digup` is the helper and developer CLI (`.build/release/digup --help`).
+
+Profile large synthetic indexes on your Mac without downloading a model:
+
+```sh
+scripts/profile-search.sh --sizes 10000,50000,100000 --iterations 15 --output search-profile.json
+python3 scripts/compare-search.py --baseline 0f0bd5f --output build.noindex/search-profile
+```
+
+The comparison builds both revisions in temporary packages and runs them sequentially on the same machine. It reports
+p50/p95 latency, prepared statement counts, vector scans, phase timings and process peak memory. Mac CI runs the same
+comparison and uploads its JSON reports. See [performance notes](docs/performance.md) for methodology and results.
 
 Use `scripts/dev-run.sh` for an isolated development app, model folder, settings and index. Tests use temporary indexes.
 `evals/` contains search-quality checks. `scripts/make-testbed.sh` generates test media and needs developer-installed

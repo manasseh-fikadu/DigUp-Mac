@@ -812,6 +812,7 @@ nonisolated final class Engine: @unchecked Sendable {
         if code { return await searchCode(text, vector: vector, prefixLast: prefixLast, limit: limit) }
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
+                try? searcher?.refreshIfNeeded()
                 var values = vector?.values
                 if let vector, let indexed = searcher?.vectorSource, indexed != vector.source {
                     if !warnedAboutSource {
@@ -843,6 +844,7 @@ nonisolated final class Engine: @unchecked Sendable {
             searchQueue.async { [self] in
                 let (roots, skipped) = lock.withLock { (codeRoots.map(\.path), codeExcluded.map(\.path)) }
                 guard !roots.isEmpty, let codeSearcher else { return continuation.resume(returning: []) }
+                try? codeSearcher.refreshIfNeeded()
                 var values = vector?.values
                 if let vector, let indexed = codeSearcher.vectorSource, indexed != vector.source { values = nil }
                 let hits = (try? codeSearcher.search(text, queryVector: values, limit: limit, prefixLast: prefixLast)) ?? []
@@ -850,6 +852,41 @@ nonisolated final class Engine: @unchecked Sendable {
                     FolderSelection.isSearched(hit.path, folders: roots, skipped: skipped)
                         && FileManager.default.fileExists(atPath: hit.path)
                 })
+            }
+        }
+    }
+
+    /// The window needs all-kind counts and a full filtered page. Keep them on one query snapshot and queue turn.
+    func searchWindow(_ text: String, vector: QueryVector?, kinds: Set<FileKind>?, limit: Int,
+                      code: Bool) async -> SearchPage {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                let empty = SearchPage(all: [], hits: [])
+                guard let searcher = code ? self.codeSearcher : self.searcher else {
+                    return continuation.resume(returning: empty)
+                }
+                let (roots, skipped, types): ([String], [String], Set<String>) = lock.withLock {
+                    code ? (codeRoots.map(\.path), codeExcluded.map(\.path), [])
+                        : (self.roots.map(\.path), excluded.map(\.path), Set(excludedTypes))
+                }
+                guard !roots.isEmpty else { return continuation.resume(returning: empty) }
+                // Source checks must use current metadata, including when the indexing helper changed the model.
+                try? searcher.refreshIfNeeded()
+                var values = vector?.values
+                if let vector, let indexed = searcher.vectorSource, indexed != vector.source { values = nil }
+                guard let page = try? searcher.searchPage(text, queryVector: values, kinds: kinds, limit: limit) else {
+                    return continuation.resume(returning: empty)
+                }
+                var visible: [String: Bool] = [:]
+                let allowed = { (hit: SearchHit) -> Bool in
+                    if let cached = visible[hit.path] { return cached }
+                    let include = FolderSelection.isSearched(hit.path, folders: roots, skipped: skipped)
+                        && !types.contains((hit.path as NSString).pathExtension.lowercased())
+                        && FileManager.default.fileExists(atPath: hit.path)
+                    visible[hit.path] = include
+                    return include
+                }
+                continuation.resume(returning: SearchPage(all: page.all.filter(allowed), hits: page.hits.filter(allowed)))
             }
         }
     }

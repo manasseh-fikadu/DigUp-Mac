@@ -28,29 +28,98 @@ excluded from its build. The model still needs about 865 MB on disk and dominate
 model, quantization, prompts, vector format, index version and ranking rules were kept unchanged, so existing Mac
 indexes remain compatible.
 
-## Next work, in order
+## Search work completed
 
-1. **Measure real workloads.** Record the app and helper separately in Instruments (Time Profiler, Allocations and
-   Energy Log). Use the same Mac, power mode, index and query set for both revisions. Startup, first query, warm query,
-   fast typing and a long scrolling session have different bottlenecks.
-2. **Avoid rescoring when changing a kind filter.** The window currently makes an all-kind search for filter counts
-   and a filtered search for full results. Cache ranked candidate IDs for a query and hydrate only the visible slice.
-   Keep ranking, per-kind limits and weaker-match thresholds identical; filtering only the first 120 hits would lose
-   valid deeper matches.
-3. **Reduce search SQL overhead.** Profile metadata hydration and FTS coverage queries. Batch reads for the final
-   candidate IDs, and consider a bounded prepared-statement cache if SQLite preparation shows up in profiles.
-4. **Scale beyond large personal indexes.** Every semantic query currently scans every vector. Benchmark block sizes
-   and Accelerate throughput first. Consider a disk-backed approximate nearest-neighbor index only when real index
-   sizes justify its extra storage, maintenance and possible recall loss.
-5. **Improve image cancellation.** The new queues bound work and prevent stale images from publishing. If native
-   rendering still wastes time when scrolling, add per-consumer cancellation with Quick Look request cancellation and
-   AVAssetImageGenerator cancellation, without canceling another view's shared request.
-6. **Make first-run setup shorter.** The existing folder estimates and optional code step are useful, but a future
-   pass can put code and indexing schedules in progressive disclosure. Keep privacy choices and folder estimates
-   visible before indexing starts.
-7. **Measure model variants separately.** A smaller model or more aggressive quantization could reduce disk/RAM use,
-   but needs multilingual, screenshot, code and audio/video evals and a deliberate index migration. This pass keeps
-   search quality and index compatibility stable.
+- `Searcher.searchPage` builds all-kind counts and a complete selected-kind page from the same vector and FTS
+  snapshot. It preserves the global 1,000-row FTS budget, the 100-file keyword budget within each filter, per-kind
+  limits, score ordering, excerpts, code definition lines and weaker-match thresholds. Matches below the all-kind
+  page limit remain available to filtered pages.
+- The main window reuses its completed query vector when only a filter changes. It skips the intermediate keyword
+  stage and model request in that case. Switching between files and code still uses the appropriate prompt.
+- A single recent query retains its best segment per file, keyword coverage and snippets. Its result-page cache is
+  limited to 16 pages of at most 256 results; its metadata cache holds at most 1,024 segments. A different query,
+  explicit reload or idle vector release discards it.
+- File and segment metadata are fetched with one join per 400 distinct segment IDs, shared by all/filtered views.
+  Code fallback text and line locations use that same batch. Identifier definition lookups remain bounded to the
+  first ten results, with up to 300 stretches per file.
+- Keyword coverage combines up to 32 term lookups into one prepared statement; snippets are fetched together for
+  newly needed files. Common results are hydrated once rather than once for each view.
+- Cache freshness checks use SQLite's [`data_version`](https://www.sqlite.org/pragma.html#pragma_data_version)
+  for other connections and `sqlite3_total_changes64` for the search connection's own writes. Committed indexing
+  changes refresh cached file facts and vectors. Folder exclusions and file existence are still checked by the app.
+- `SearchMetrics` exposes phase timings, actual vector scans, prepared statement counts and hydrated row counts.
+  `digup-benchmark` exercises the production search implementation with deterministic synthetic indexes, without
+  reading the app's real index, downloading a model or including query encoding in the reported search times.
+
+## Reproduce the profiles
+
+On an Apple Silicon Mac with full Xcode 26 or later:
+
+```sh
+# Current implementation only; output contains 10k, 50k and 100k-vector workloads.
+scripts/profile-search.sh --sizes 10000,50000,100000 --iterations 15 --output search-profile.json
+
+# The earlier implementation and the current one, on the same Mac.
+python3 scripts/compare-search.py --baseline 0f0bd5f --output build.noindex/search-profile
+```
+
+The comparison creates separate Swift packages containing each revision's actual `DigUpKit` sources, builds both in
+release mode with the same compiler, and runs them sequentially. The earlier version receives counters/timers and a
+page API adapter that calls its original all-kind and filtered searches. Its ranking and SQL stay intact. No copy of
+an older production search engine is shipped in the app. The comparator rejects unrecognized baseline layouts.
+
+The fixture has one 768-dimensional float16 vector per file, six file kinds, repeated document text and deterministic
+outliers. It includes exact-word matches and semantic matches beyond the all-kind result limit. Fifteen measurements
+per workload give nearest-rank p50 and p95. Index creation/checkpointing and initial vector loading are reported
+separately from query latency. Peak resident memory is the process high-water mark, cumulative across datasets.
+Each scenario measures either one window update or a complete cycle through six filters, as its name indicates.
+
+The reports cover first search, distinct queries, first-time filter cycles, repeated filter cycles and keyword-only
+pages. They exclude the embedding model, UI rendering, outer app source validation and file existence checks. These
+synthetic results measure engine work; they do not predict first-launch time, total app memory or every real query.
+FTS coverage/snippet reads are part of the new ranking phase, so phase boundaries differ slightly from the old engine;
+compare end-to-end search times for speedup claims.
+
+The macOS workflow runs the native comparison and uploads `before.json`, `after.json` and `summary.json` as the
+`search-profile-macos-arm64` artifact. Raw VPS reports are versioned under `benchmarks/results/`; they use actual Swift
+search and SQLite code with a temporary CPU vector-math adapter instead of Apple's Accelerate and are separate from
+native Mac measurements. Regression tests include 160 old/new hit-field comparisons in the VPS validation harness,
+multilingual keyword tests, bounded SQL batches, deep filtered results, local/external writes, idle cache release,
+code line targets, and window filter reuse/cancellation tests.
+
+## VPS measurements
+
+Measured on the same Linux VPS with Swift 6.2 release builds and SQLite 3.46.1. The temporary validation package uses
+the production search/database code and a Swift SIMD CPU adapter in place of Accelerate. These are engine-only,
+synthetic measurements; they are not Mac latency estimates. Raw reports and source identification are in
+[`benchmarks/results`](../benchmarks/results/).
+
+A first-time cycle through all six kind filters, p50/p95 milliseconds:
+
+| Vectors | Before p50 | After p50 | Before p95 | After p95 | Vector scans | Prepared statements |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 584.55 | 149.57 | 603.34 | 177.23 | 11 → 1 | 2687 → 28 |
+| 50,000 | 2359.98 | 472.69 | 2421.46 | 492.71 | 11 → 1 | 2717 → 28 |
+| 100,000 | 4486.44 | 876.76 | 4583.60 | 925.84 | 11 → 1 | 2717 → 28 |
+
+At 100,000 vectors, a distinct-query window update (all-kind counts plus a filtered page) changed from
+808.55 to 499.66 ms p50, and from 494 to 10 prepared statements. A repeated six-filter cycle changed from 4513.40 to 0.87 ms p50 with no new vector scans and six revision-check statements. Repeated-page timings are sensitive to shared-VPS
+scheduling; use the native comparison on your own Mac for decisions about user-visible latency.
+
+The remaining distinct-query costs include the full vector matrix scan/conversion and FTS ranking over common words.
+The result-page cache specifically removes repeated candidate ranking during filter revisits. A prepared-statement
+cache was not added: batching removes most prepares without introducing statement lifetime/schema invalidation state.
+
+## Remaining profiling work
+
+1. Record real app/helper workloads in Instruments (Time Profiler, Allocations, Energy Log): cold/warm queries,
+   typing, scrolling and indexing at the same time. Use the same Mac, power mode, index and query set for both revisions.
+2. For indexes beyond personal-library sizes, benchmark Accelerate block sizes and memory bandwidth. Introduce
+   approximate nearest-neighbor indexing only if scan time justifies its storage, maintenance and possible recall loss.
+3. If scrolling profiles still show wasted work, cancel native Quick Look and AVAssetImageGenerator requests per
+   consumer while preserving another view's shared render.
+4. Consider shorter setup and alternative model/quantization sizes separately, with search-quality evals and an
+   explicit index migration where vectors change.
 
 ## Mac verification
 

@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "DigUpApp", targets: ["DigUpApp"]),
         .executable(name: "digup", targets: ["digup"]),
+        .executable(name: "digup-benchmark", targets: ["SearchBenchmark"]),
         .library(name: "DigUpKit", targets: ["DigUpKit"]),
     ],
     dependencies: [
@@ -22,6 +23,8 @@ let package = Package(
         .target(name: "LlamaRuntime", dependencies: ["CLlama", "DigUpKit"],
                 linkerSettings: [.unsafeFlags(["-L\(vendor)/llama/lib"])]),
         .executableTarget(name: "digup", dependencies: ["DigUpKit", "LlamaRuntime"]),
+        // Developer-only profiling; not bundled with the app and needs no embedding model.
+        .executableTarget(name: "SearchBenchmark", dependencies: ["DigUpKit"], path: "benchmarks/SearchBenchmark"),
         // A different executable name avoids colliding with digup on case-insensitive disks.
         .executableTarget(
             name: "DigUpApp",

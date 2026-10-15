@@ -23,6 +23,31 @@ public struct SearchHit: Sendable {
     public var focus: Double? = nil
 }
 
+/// One window update: counts come from `all`, while `hits` has a full page of the selected kinds.
+public struct SearchPage: Sendable {
+    public let all: [SearchHit]
+    public let hits: [SearchHit]
+
+    public init(all: [SearchHit], hits: [SearchHit]) {
+        self.all = all
+        self.hits = hits
+    }
+}
+
+/// Timings and actual work for the most recent search, excluding model encoding and file-system checks.
+public struct SearchMetrics: Codable, Sendable {
+    public var reusedQuery = false
+    public var vectorScans = 0
+    public var sqlStatements = 0
+    public var vectorMilliseconds = 0.0
+    public var keywordMilliseconds = 0.0
+    public var rankingMilliseconds = 0.0
+    public var hydrationMilliseconds = 0.0
+    public var hydratedRows = 0
+
+    public init() {}
+}
+
 /// Hybrid search: meaning (EmbeddingGemma's vectors) + words (FTS5).
 ///
 /// Meaning is the model's cosine similarity, put on one scale per query (`meaning`): every vector is scored anyway, so
@@ -30,6 +55,82 @@ public struct SearchHit: Sendable {
 /// gives an honest "nothing found". Words rescue what a vector can't hold exactly: codes, IDs and names.
 public final class Searcher {
     let store: IndexStore
+    public private(set) var lastMetrics = SearchMetrics()
+    public private(set) var vectorScanCount = 0
+    private var loadedRevision: Database.Revision?
+    private var prepared: PreparedQuery?
+
+    private struct MeaningMatch {
+        let z: Double
+        let cosine: Double
+        let segment: Int64
+    }
+
+    private struct WordMatch {
+        let file: Int64
+        let segment: Int64
+        let kind: SegmentKind
+    }
+
+    /// One query only. Changing kind/limit reuses its scan; index writes, reload and idle release discard it.
+    private final class PreparedQuery {
+        let text: String
+        let vector: [Float]?
+        let prefixLast: Bool
+        let terms: [String]
+        let identifier: [String]?
+        let patterns: [String]
+        let meaning: [Int64: MeaningMatch]
+        let words: [WordMatch]
+        var coverage: [Int64: Double] = [:]
+        var coveredFiles = Set<Int64>()
+        var snippets: [Int64: String] = [:]
+        var snippetsLoaded = Set<Int64>()
+        var records: [Int64: HitRecord] = [:]   // at most 1,024 hydrated segments
+        var selections: [SelectionKey: [Selection]] = [:]   // at most 16 pages, each at most 256 results
+
+        init(text: String, vector: [Float]?, prefixLast: Bool, terms: [String], identifier: [String]?,
+             patterns: [String], meaning: [Int64: MeaningMatch], words: [WordMatch]) {
+            self.text = text
+            self.vector = vector
+            self.prefixLast = prefixLast
+            self.terms = terms
+            self.identifier = identifier
+            self.patterns = patterns
+            self.meaning = meaning
+            self.words = words
+        }
+    }
+
+    private struct Selection {
+        let file: Int64
+        let score: Double
+        let semantic: MeaningMatch?
+        let keyword: (rank: Int, match: WordMatch)?
+        var segment: Int64
+        var focus: Double?
+        var focusWords: [String]?
+    }
+
+    private struct SelectionKey: Hashable {
+        let kinds: Set<FileKind>?
+        let limit: Int
+        let zGate: Double
+        let wordWeight: Double
+    }
+
+    private struct HitRecord {
+        let segment: SegmentKind
+        let loc: Double?
+        let locEnd: Double?
+        let excerpt: String?
+        let path: String
+        let kind: FileKind
+        let modified: Double
+        let size: Int64
+        let info: [String: String]
+        let text: String?
+    }
     private var matrix: VectorStorage?   // rows × 768 float16, row-major
     private var rowFile: [Int64] = []
     private var rowSegment: [Int64] = []
@@ -89,6 +190,7 @@ public final class Searcher {
 
     /// Frees the vectors' memory; keyword search keeps working.
     public func releaseVectors() {
+        prepared = nil
         matrix = nil
         rowFile = []
         rowSegment = []
@@ -98,11 +200,13 @@ public final class Searcher {
     }
 
     private func reloadFiles() throws {
+        let revision = try store.db.revision()
         fileKind.removeAll(keepingCapacity: true)
         try store.db.query("SELECT id, kind FROM files") { row in
             fileKind[row.int(0)] = FileKind(rawValue: row.text(1) ?? "")
         }
         vectorSource = try store.meta("vector_source")
+        loadedRevision = revision
     }
 
     /// How much finding the query's words counts against meaning (`search`). Code's words count for less: they're
@@ -112,163 +216,243 @@ public final class Searcher {
     public static let wordWeight = 2.0
     public static let codeWordWeight = 1.0
 
+    /// Refresh cached file facts and vectors when either this connection or the indexing helper wrote the index.
+    public func refreshIfNeeded() throws {
+        guard try store.db.revision() != loadedRevision else { return }
+        prepared = nil
+        if vectorsLoaded { try reload() } else { try reloadFiles() }
+    }
+
     public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
                        zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
-        let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
-        if queryVector != nil, !vectorsLoaded { try reload() }
-        let fileKind = self.fileKind
-        let allowed = { (file: Int64) -> Bool in kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false }
+        try searches(text, queryVector: queryVector, filters: [kinds], limit: limit, zGate: zGate,
+                     wordWeight: wordWeight, prefixLast: prefixLast)[0]
+    }
 
-        // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment.
-        var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
-        if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
-            let scores = score(query)
-            let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
-            for row in 0..<scores.count where allowed(rowFile[row]) {
-                let z = meaning[row]
-                if z > (best[rowFile[row]]?.z ?? -.infinity) { best[rowFile[row]] = (z, Double(scores[row]), row) }
+    /// All-kind counts and a complete filtered page share one vector/FTS scan and one hydration batch.
+    public func searchPage(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 120,
+                           zGate: Double = 2.0, wordWeight: Double? = nil,
+                           prefixLast: Bool = false) throws -> SearchPage {
+        let results = try searches(text, queryVector: queryVector, filters: kinds == nil ? [nil] : [nil, kinds],
+                                   limit: limit, zGate: zGate, wordWeight: wordWeight, prefixLast: prefixLast)
+        return SearchPage(all: results[0], hits: results.last!)
+    }
+
+    private func searches(_ text: String, queryVector: [Float]?, filters: [Set<FileKind>?], limit: Int,
+                          zGate: Double, wordWeight: Double?, prefixLast: Bool) throws -> [[SearchHit]] {
+        lastMetrics = SearchMetrics()
+        let statements = store.db.preparedStatementCount
+        defer { lastMetrics.sqlStatements = store.db.preparedStatementCount - statements }
+        guard limit > 0 else { return filters.map { _ in [] } }
+        let query = try prepare(text, vector: queryVector, prefixLast: prefixLast)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let selections = try filters.map { try select(query, kinds: $0, limit: limit, zGate: zGate,
+                                                      wordWeight: wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)) }
+        lastMetrics.rankingMilliseconds = Self.elapsed(started)
+        let hydration = DispatchTime.now().uptimeNanoseconds
+        let records = try records(for: selections.flatMap { $0.map(\.segment) }, query: query)
+        let results = selections.map { selected in
+            selected.compactMap { selection -> SearchHit? in
+                guard let record = records[selection.segment] else { return nil }
+                var focus = selection.focus
+                if focus == nil, let words = selection.focusWords, let text = record.text {
+                    focus = CodeLookup.firstLine(with: words, in: text, first: Int(record.loc ?? 1)).map(Double.init)
+                }
+                let keyword = selection.keyword
+                var snippet = keyword.flatMap {
+                    $0.match.segment == selection.segment ? query.snippets[$0.match.segment] : nil
+                }.flatMap { $0.contains("«") ? excerpt($0, limit: 400) : nil }
+                // An image vector can borrow its own screenshot's OCR, but never another PDF page's text.
+                if snippet == nil, record.excerpt == nil, record.loc == nil, let match = keyword?.match,
+                   match.kind != .name, let text = query.snippets[match.segment], text.contains("«") {
+                    snippet = excerpt(text, limit: 400)
+                }
+                return SearchHit(path: record.path, kind: record.kind, score: selection.score,
+                                 z: selection.semantic?.z, cosine: selection.semantic?.cosine,
+                                 keywordRank: keyword?.rank, segment: record.segment, segmentID: selection.segment,
+                                 loc: record.loc, locEnd: record.locEnd, excerpt: snippet ?? record.excerpt,
+                                 modified: record.modified, size: record.size, info: record.info, focus: focus)
             }
         }
+        lastMetrics.hydrationMilliseconds = Self.elapsed(hydration)
+        return results
+    }
 
-        // Words: FTS5 with Porter stemming over file names, folder names, OCR, page and document text. A name from code
-        // ("quantize_row_q8_0_ref") is matched as one phrase, as it's written.
+    private func prepare(_ text: String, vector: [Float]?, prefixLast: Bool) throws -> PreparedQuery {
+        try refreshIfNeeded()
+        if vector != nil, !vectorsLoaded { try reload() }
+        if let prepared, prepared.text == text, prepared.vector == vector, prepared.prefixLast == prefixLast {
+            lastMetrics.reusedQuery = true
+            return prepared
+        }
+        // Drop the previous query before allocating its replacement, including its file metadata and excerpts.
+        prepared = nil
+        var best: [Int64: MeaningMatch] = [:]
+        let started = DispatchTime.now().uptimeNanoseconds
+        if let vector, vector.count == Vectors.dimension, !rowFile.isEmpty {
+            let scores = score(vector)
+            let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
+            for row in scores.indices {
+                let file = rowFile[row], z = meaning[row]
+                if z > (best[file]?.z ?? -.infinity) {
+                    best[file] = MeaningMatch(z: z, cosine: Double(scores[row]), segment: rowSegment[row])
+                }
+            }
+            vectorScanCount += 1
+            lastMetrics.vectorScans = 1
+        }
+        lastMetrics.vectorMilliseconds = Self.elapsed(started)
+        let keywordStart = DispatchTime.now().uptimeNanoseconds
         let terms = Self.terms(text)
         let identifier = isCode ? CodeLookup.identifier(text) : nil
-        var words: [(file: Int64, segment: Int64, snippet: String?)] = []
-        var coverage: [Int64: Double] = [:]   // share of the query's words found anywhere in the file
         var patterns = identifier.map { [CodeLookup.phrase($0)] } ?? Self.patterns(terms, prefixLast: prefixLast)
-        // A word that's in no file as typed matches as the start of longer words, as the last word does while it's
-        // being typed: "grok" finds "Grok4" and "Grokipedia" (stemming only covers endings, as in "grokking").
-        // Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index
-        // as typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too
-        // many words to stand for one.
         if identifier == nil {
             for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
                 if try !isIndexed(patterns[index]) { patterns[index] += "*" }
             }
         }
+        var words: [WordMatch] = []
         if !patterns.isEmpty {
             var seen = Set<Int64>()
             try store.db.query("""
-                SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts
-                JOIN segments s ON s.id = fts.rowid
+                SELECT s.file, s.id, s.kind FROM fts JOIN segments s ON s.id = fts.rowid
                 WHERE fts MATCH ? ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
                 """, [.text(patterns.joined(separator: " OR "))]) { row in
-                let file = row.int(0)
-                guard words.count < 100, allowed(file), seen.insert(file).inserted else { return }
-                // Text that normalizing changed is quoted as it's written (with its hamza, harakat, joiners).
-                let snippet = row.text(3).flatMap { SearchText.snippet($0, terms: terms) } ?? row.text(2)
-                words.append((file, row.int(1), snippet))
-            }
-            if !words.isEmpty {
-                let files = words.map { String($0.file) }.joined(separator: ",")
-                for pattern in patterns {
-                    try store.db.query("""
-                        SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid
-                        WHERE fts MATCH ? AND s.file IN (\(files))
-                        """, [.text(pattern)]) { coverage[$0.int(0), default: 0] += 1 / Double(patterns.count) }
-                }
+                guard seen.insert(row.int(0)).inserted else { return }
+                words.append(WordMatch(file: row.int(0), segment: row.int(1),
+                                       kind: SegmentKind(rawValue: row.text(2) ?? "") ?? .name))
             }
         }
-
-        // A file qualifies by standing out in meaning, or by containing at least half of the query's words.
-        // Score: meaning z + a bonus that grows with word coverage, + 1 for the kind the query asks for.
-        // One common word can't beat a strong meaning match; all the words of an exact lookup usually do.
-        // (This beat reciprocal-rank fusion on both evals, 2026-10-07: R@1 0.88 vs 0.73 synthetic, 0.86 vs 0.82 real.)
-        let lookup = Self.isLookup(terms) || identifier != nil
-        let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
-        let hinted = Self.kindHints(text)
-        var candidates = Set(best.filter { $0.value.z >= zGate }.keys)
-        for (file, share) in coverage where share >= 0.5 { candidates.insert(file) }
-        var scored: [Int64: Double] = [:]
-        for file in candidates {
-            var score = meaningWeight * max(best[file]?.z ?? 0, 0) + wordsWeight * pow(coverage[file] ?? 0, 1.5)
-            if let kind = fileKind[file], hinted.contains(kind) { score += 1 }
-            scored[file] = score
-        }
-
-        let wordRank = Dictionary(words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) },
-                                  uniquingKeysWith: { first, _ in first })
-        var hits: [SearchHit] = []
-        for (file, score) in scored.sorted(by: { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) })
-            .prefix(limit) {
-            let rank = hits.count
-            let semantic = best[file]
-            let keyword = wordRank[file]
-            // Point at the best meaning segment if it stands out; else at the segment the words matched.
-            let useMeaning = semantic.map { $0.z >= zGate || keyword == nil } ?? false
-            guard var segmentID = useMeaning ? semantic.map({ rowSegment[$0.row] }) : keyword?.1.segment else { continue }
-            var focus: Double?
-            if isCode {
-                // Where a name is defined is looked for in the first 10 results only: a name used all over a big repo
-                // (ggml_tensor) is in hundreds of stretches of every file that has it (2026-10-09, llama.cpp and two
-                // more repos: 560 → 100 ms a search; the others take 10–50 ms).
-                (segmentID, focus) = try codePlace(file: file, segment: segmentID,
-                                                   identifier: rank < 10 ? identifier : nil, query: text, terms: terms,
-                                                   wordsHere: keyword?.1.segment == segmentID || identifier != nil)
-            }
-            var path = "", kind = FileKind.doc, modified = 0.0, size: Int64 = 0, info: [String: String] = [:]
-            try store.db.query("SELECT path, kind, mtime, size, info FROM files WHERE id = ?", [.int(file)]) {
-                path = $0.text(0) ?? ""
-                kind = FileKind(rawValue: $0.text(1) ?? "") ?? .doc
-                modified = $0.double(2)
-                size = $0.int(3)
-                if let json = $0.text(4)?.data(using: .utf8) {
-                    info = (try? JSONSerialization.jsonObject(with: json) as? [String: String]) ?? [:]
-                }
-            }
-            var segment = SegmentKind.name, loc: Double?, locEnd: Double?, storedExcerpt: String?
-            try store.db.query("SELECT kind, loc, loc_end, excerpt FROM segments WHERE id = ?", [.int(segmentID)]) {
-                segment = SegmentKind(rawValue: $0.text(0) ?? "") ?? .name
-                loc = $0.isNull(1) ? nil : $0.double(1)
-                locEnd = $0.isNull(2) ? nil : $0.double(2)
-                storedExcerpt = $0.text(3)
-            }
-            // Quote the matched words only when they come from the segment we point at, so a PDF hit on page 5
-            // never shows page 2's words. A segment with no place and no text of its own (a screenshot's image
-            // vector) can borrow them from its file's OCR text, which describes the same picture.
-            var snippet = keyword.flatMap { $0.1.segment == segmentID ? $0.1.snippet : nil }
-                .flatMap { $0.contains("«") ? excerpt($0, limit: 400) : nil }
-            if snippet == nil, storedExcerpt == nil, loc == nil, let match = keyword?.1,
-               let text = match.snippet, text.contains("«") {
-                var matchedKind: String?
-                try store.db.query("SELECT kind FROM segments WHERE id = ?", [.int(match.segment)]) {
-                    matchedKind = $0.text(0)
-                }
-                if matchedKind != SegmentKind.name.rawValue { snippet = excerpt(text, limit: 400) }
-            }
-            hits.append(SearchHit(path: path, kind: kind, score: score, z: semantic?.z, cosine: semantic?.cosine,
-                                  keywordRank: keyword?.0, segment: segment, segmentID: segmentID, loc: loc,
-                                  locEnd: locEnd,
-                                  excerpt: snippet ?? storedExcerpt, modified: modified, size: size, info: info,
-                                  focus: focus))
-        }
-        return hits
+        let result = PreparedQuery(text: text, vector: vector, prefixLast: prefixLast, terms: terms,
+                                   identifier: identifier, patterns: patterns, meaning: best, words: words)
+        prepared = result
+        lastMetrics.keywordMilliseconds = Self.elapsed(keywordStart)
+        return result
     }
 
-    /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that
-    /// defines it, when one does (not the ones that call it). Otherwise the line is the first with the query's words,
-    /// when they matched in this stretch; a match by meaning alone opens at the stretch's first line.
-    private func codePlace(file: Int64, segment: Int64, identifier: [String]?, query: String, terms: [String],
-                           wordsHere: Bool) throws -> (Int64, Double?) {
-        let name = query.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "()", with: "")
-        if let identifier {
-            var best: (segment: Int64, line: Int, strength: Int)?
-            try store.db.query("""
-                SELECT s.id, s.loc, coalesce(fts.original, fts.body) FROM fts JOIN segments s ON s.id = fts.rowid
-                WHERE fts MATCH ? AND s.file = ? ORDER BY s.loc LIMIT 300
-                """, [.text(CodeLookup.phrase(identifier)), .int(file)]) { row in
-                guard best?.strength ?? 0 < 2, let text = row.text(2),
-                      let found = CodeLookup.definition(of: name, in: text, first: Int(row.double(1))) else { return }
-                if found.strength > (best?.strength ?? 0) { best = (row.int(0), found.line, found.strength) }
+    private func select(_ query: PreparedQuery, kinds: Set<FileKind>?, limit: Int, zGate: Double,
+                        wordWeight: Double) throws -> [Selection] {
+        let key = SelectionKey(kinds: kinds, limit: limit, zGate: zGate, wordWeight: wordWeight)
+        if let cached = query.selections[key] { return cached }
+        let allowed = { (file: Int64) in kinds == nil || self.fileKind[file].map { kinds!.contains($0) } ?? false }
+        // Preserve the original per-filter 100-file keyword budget, inside the same global 1,000 FTS rows.
+        let words = Array(query.words.lazy.filter { allowed($0.file) }.prefix(100))
+        try keywords(words, query: query)
+        let best = query.meaning
+        let lookup = Self.isLookup(query.terms) || query.identifier != nil
+        let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
+        let hinted = Self.kindHints(query.text)
+        var candidates = Set(best.lazy.filter { allowed($0.key) && $0.value.z >= zGate }.map(\.key))
+        for word in words where query.coverage[word.file, default: 0] >= 0.5 { candidates.insert(word.file) }
+        let scored = candidates.map { file -> (file: Int64, score: Double) in
+            var score = meaningWeight * max(best[file]?.z ?? 0, 0)
+                + wordsWeight * pow(query.coverage[file] ?? 0, 1.5)
+            if let kind = fileKind[file], hinted.contains(kind) { score += 1 }
+            return (file, score)
+        }.sorted { $0.score > $1.score || ($0.score == $1.score && $0.file < $1.file) }
+        let wordRank = Dictionary(uniqueKeysWithValues: words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) })
+        var selected: [Selection] = []
+        for candidate in scored.prefix(limit) {
+            let file = candidate.file, semantic = best[file], keyword = wordRank[file]
+            let useMeaning = semantic.map { $0.z >= zGate || keyword == nil } ?? false
+            guard let segment = useMeaning ? semantic?.segment : keyword?.1.segment else { continue }
+            var selection = Selection(file: file, score: candidate.score, semantic: semantic, keyword: keyword,
+                                      segment: segment)
+            if isCode {
+                let identifier = selected.count < 10 ? query.identifier : nil
+                if let identifier, let found = try codeDefinition(file: file, identifier: identifier, query: query.text) {
+                    selection.segment = found.segment
+                    selection.focus = found.focus
+                } else if keyword?.1.segment == segment || query.identifier != nil {
+                    let name = query.text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "()", with: "")
+                    selection.focusWords = identifier == nil ? query.terms : [name.lowercased()]
+                }
             }
-            if let best { return (best.segment, Double(best.line)) }
+            selected.append(selection)
         }
-        guard wordsHere || identifier != nil, let text = try text(ofSegment: segment) else { return (segment, nil) }
-        var first = 1
-        try store.db.query("SELECT loc FROM segments WHERE id = ?", [.int(segment)]) { first = Int($0.double(0)) }
-        let words = identifier == nil ? terms : [name.lowercased()]
-        return (segment, CodeLookup.firstLine(with: words, in: text, first: first).map(Double.init))
+        if limit <= 256, query.selections.count < 16 { query.selections[key] = selected }
+        return selected
+    }
+
+    /// Coverage for all newly requested files uses one compound statement per batch of 32 terms.
+    /// Snippets are fetched in one FTS batch, only for files a filter actually needs.
+    private func keywords(_ words: [WordMatch], query: PreparedQuery) throws {
+        let missing = words.filter { !query.coveredFiles.contains($0.file) }.map(\.file)
+        if !missing.isEmpty, !query.patterns.isEmpty {
+            let values = Array(repeating: "(?)", count: missing.count).joined(separator: ",")
+            for start in stride(from: 0, to: query.patterns.count, by: 32) {
+                let patterns = Array(query.patterns[start..<min(start + 32, query.patterns.count)])
+                let parts = patterns.map { _ in """
+                    SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid
+                    WHERE fts MATCH ? AND s.file IN (SELECT file FROM candidates)
+                    """ }
+                let sql = "WITH candidates(file) AS (VALUES \(values)) " + parts.joined(separator: " UNION ALL ")
+                try store.db.query(sql, missing.map(SQLValue.int) + patterns.map(SQLValue.text)) {
+                    query.coverage[$0.int(0), default: 0] += 1 / Double(query.patterns.count)
+                }
+            }
+            query.coveredFiles.formUnion(missing)
+        }
+        let snippets = words.filter { !query.snippetsLoaded.contains($0.segment) }.map(\.segment)
+        if !snippets.isEmpty {
+            let slots = Array(repeating: "?", count: snippets.count).joined(separator: ",")
+            try store.db.query("""
+                SELECT rowid, snippet(fts, 1, '«', '»', '…', 12), original FROM fts
+                WHERE fts MATCH ? AND rowid IN (\(slots))
+                """, [.text(query.patterns.joined(separator: " OR "))] + snippets.map(SQLValue.int)) { row in
+                query.snippets[row.int(0)] = row.text(2).flatMap { SearchText.snippet($0, terms: query.terms) } ?? row.text(1)
+            }
+            query.snippetsLoaded.formUnion(snippets)
+        }
+    }
+
+    /// File metadata, segment locations and code text are joined once for up to 400 IDs, below SQLite's bind limit.
+    private func records(for segments: [Int64], query: PreparedQuery) throws -> [Int64: HitRecord] {
+        var records = query.records
+        let missing = Array(Set(segments).subtracting(records.keys)).sorted()
+        for start in stride(from: 0, to: missing.count, by: 400) {
+            let ids = Array(missing[start..<min(start + 400, missing.count)])
+            let slots = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let text = isCode ? "coalesce(fts.original, fts.body)" : "NULL"
+            let join = isCode ? "LEFT JOIN fts ON fts.rowid = s.id" : ""
+            try store.db.query("""
+                SELECT s.id, s.kind, s.loc, s.loc_end, s.excerpt, f.path, f.kind, f.mtime, f.size, f.info, \(text)
+                FROM segments s JOIN files f ON f.id = s.file \(join) WHERE s.id IN (\(slots))
+                """, ids.map(SQLValue.int)) { row in
+                var info: [String: String] = [:]
+                if let json = row.text(9)?.data(using: .utf8) {
+                    info = (try? JSONSerialization.jsonObject(with: json) as? [String: String]) ?? [:]
+                }
+                let record = HitRecord(segment: SegmentKind(rawValue: row.text(1) ?? "") ?? .name,
+                                       loc: row.isNull(2) ? nil : row.double(2),
+                                       locEnd: row.isNull(3) ? nil : row.double(3), excerpt: row.text(4),
+                                       path: row.text(5) ?? "", kind: FileKind(rawValue: row.text(6) ?? "") ?? .doc,
+                                       modified: row.double(7), size: row.int(8), info: info, text: row.text(10))
+                records[row.int(0)] = record
+                if query.records.count < 1024 { query.records[row.int(0)] = record }
+                lastMetrics.hydratedRows += 1
+            }
+        }
+        return records
+    }
+
+    /// An identifier lookup stays limited to ten results and 300 stretches per file, as before.
+    private func codeDefinition(file: Int64, identifier: [String], query: String) throws -> (segment: Int64, focus: Double)? {
+        let name = query.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "()", with: "")
+        var best: (segment: Int64, line: Int, strength: Int)?
+        try store.db.query("""
+            SELECT s.id, s.loc, coalesce(fts.original, fts.body) FROM fts JOIN segments s ON s.id = fts.rowid
+            WHERE fts MATCH ? AND s.file = ? ORDER BY s.loc LIMIT 300
+            """, [.text(CodeLookup.phrase(identifier)), .int(file)]) { row in
+            guard best?.strength ?? 0 < 2, let text = row.text(2),
+                  let found = CodeLookup.definition(of: name, in: text, first: Int(row.double(1))) else { return }
+            if found.strength > (best?.strength ?? 0) { best = (row.int(0), found.line, found.strength) }
+        }
+        return best.map { ($0.segment, Double($0.line)) }
+    }
+
+    private static func elapsed(_ start: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
     }
 
     /// Codes and IDs ("K7Q2LM", "TRX50") and long numbers ("4815162342": an order, a phone number) mean nothing to an

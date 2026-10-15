@@ -9,6 +9,22 @@ public final class Database {
     }
 
     let handle: OpaquePointer
+    /// Monotonic count of prepared statements, for search profiling. This connection is confined to one queue.
+    public private(set) var preparedStatementCount = 0
+
+    struct Revision: Equatable {
+        let external: Int64
+        let local: Int64
+    }
+
+    /// data_version detects commits by other connections; total_changes detects writes through this connection.
+    func revision() throws -> Revision {
+        var version: Int64 = 0
+        try query("PRAGMA data_version") { version = $0.int(0) }
+        return Revision(external: version, local: sqlite3_total_changes64(handle))
+    }
+
+    fileprivate func didPrepareStatement() { preparedStatementCount += 1 }
 
     public init(path: String) throws {
         var db: OpaquePointer?
@@ -89,6 +105,7 @@ public final class Statement {
         }
         self.statement = statement
         self.db = db
+        db.didPrepareStatement()
     }
 
     deinit { sqlite3_finalize(statement) }

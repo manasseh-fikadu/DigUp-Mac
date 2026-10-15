@@ -201,6 +201,20 @@ final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
     }
 }
 
+@MainActor
+protocol WindowSearching {
+    var hasCode: Bool { get }
+    func open(_ row: ResultRow)
+    func embedAhead(_ text: String, code: Bool)
+    func embedQuery(_ text: String, code: Bool) async -> Engine.QueryVector?
+    func search(_ text: String, vector: Engine.QueryVector?, prefixLast: Bool, kinds: Set<FileKind>?,
+                limit: Int, code: Bool) async -> [SearchHit]
+    func searchWindow(_ text: String, vector: Engine.QueryVector?, kinds: Set<FileKind>?, limit: Int,
+                      code: Bool) async -> SearchPage
+}
+
+extension Engine: WindowSearching {}
+
 /// The window's query: keyword and meaning results together after a short pause in typing, optionally of one kind.
 @Observable
 final class SearchModel {
@@ -212,7 +226,7 @@ final class SearchModel {
         didSet { if query != oldValue { run() } }
     }
     var filter: ResultGroupKind? {
-        didSet { if filter != oldValue { run() } }
+        didSet { if filter != oldValue { run(reusingQuery: true) } }
     }
     private(set) var results = ResultSet.empty
     /// Results per kind for the query, whatever the filter (the counts on the kind buttons).
@@ -233,11 +247,12 @@ final class SearchModel {
     /// The grid's columns right now (↑ ↓ move by a row).
     var columns = 1
     @ObservationIgnored weak var field: NSTextField?
-    @ObservationIgnored private let engine: Engine
+    @ObservationIgnored private let engine: any WindowSearching
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var completedQuery: (text: String, code: Bool, vector: Engine.QueryVector?)?
 
-    init(engine: Engine) {
+    init(engine: any WindowSearching) {
         self.engine = engine
     }
 
@@ -280,6 +295,7 @@ final class SearchModel {
 
     /// Closing the window releases its results and prevents late queries from retaining them.
     func reset() {
+        completedQuery = nil
         query = ""
         task?.cancel()
         task = nil
@@ -287,11 +303,12 @@ final class SearchModel {
         field = nil
     }
 
-    private func run() {
+    private func run(reusingQuery: Bool = false) {
         generation += 1
         let current = generation
         task?.cancel()
         navigated = false
+        showWeaker = false
         isSearching = false
         wordsOnly = false
         let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -314,34 +331,40 @@ final class SearchModel {
             return
         }
         let filter = self.filter
+        let reusable = reusingQuery && completedQuery?.text == text && completedQuery?.code == code
+            && completedQuery?.vector != nil ? completedQuery : nil
         isSearching = true
         task = Task {
             defer { if current == generation { isSearching = false } }
-            // Debounce before doing work, so rapid typing does not queue scans of the whole index.
-            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
-            guard !Task.isCancelled, current == generation else { return }
-            let words = await engine.search(text, vector: nil, prefixLast: true,
-                                            kinds: code ? nil : filter?.kinds, limit: 120, code: code)
-            guard !Task.isCancelled, current == generation else { return }
-            results = ResultSet(words, query: text)
-            showWeaker = false
-            selection = rows.first?.id
-            counts = [:]
-            hasResults = true
-
-            engine.embedAhead(text, code: code)
-            let vector = await engine.embedQuery(text, code: code)
-            guard !Task.isCancelled, current == generation else { return }
-            let all = await engine.search(text, vector: vector, prefixLast: false, limit: 120, code: code)
-            guard !Task.isCancelled, current == generation else { return }
-            let shown = code || filter == nil ? all
-                : await engine.search(text, vector: vector, prefixLast: false, kinds: filter!.kinds, limit: 120)
+            let vector: Engine.QueryVector?
+            if let reusable {
+                // A kind change is a view of the same query, not another keyword search and embedding request.
+                vector = reusable.vector
+            } else {
+                do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+                guard !Task.isCancelled, current == generation else { return }
+                let words = await engine.search(text, vector: nil, prefixLast: true,
+                                                kinds: code ? nil : filter?.kinds, limit: 120, code: code)
+                guard !Task.isCancelled, current == generation else { return }
+                results = ResultSet(words, query: text)
+                showWeaker = false
+                selection = rows.first?.id
+                counts = [:]
+                hasResults = true
+                engine.embedAhead(text, code: code)
+                vector = await engine.embedQuery(text, code: code)
+                guard !Task.isCancelled, current == generation else { return }
+            }
+            let page = await engine.searchWindow(text, vector: vector, kinds: code ? nil : filter?.kinds,
+                                                 limit: 120, code: code)
+            let all = page.all, shown = page.hits
             guard !Task.isCancelled, current == generation else { return }
             var counts: [ResultGroupKind: Int] = [:]
             for hit in all.prefix(Searcher.strongCount(all)) { counts[ResultGroupKind(hit.kind), default: 0] += 1 }
             self.counts = counts
             results = ResultSet(shown, query: text)
             wordsOnly = vector == nil
+            completedQuery = (text, code, vector)
             if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
             hasResults = true
             log("window: \"\(text)\"\(code ? " in code" : filter.map { " in \($0.title)" } ?? ""): \(results.ranked.count) results "
