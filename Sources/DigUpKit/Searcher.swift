@@ -338,18 +338,26 @@ public final class Searcher {
         // Preserve the original per-filter 100-file keyword budget, inside the same global 1,000 FTS rows.
         let words = Array(query.words.lazy.filter { allowed($0.file) }.prefix(100))
         try keywords(words, query: query)
+        // The snapshot can hold coverage learned for other filters. Only this filter's first 100 word hits count.
+        let coverage = Dictionary(uniqueKeysWithValues: words.map { ($0.file, query.coverage[$0.file] ?? 0) })
         let best = query.meaning
         let lookup = Self.isLookup(query.terms) || query.identifier != nil
         let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
         let hinted = Self.kindHints(query.text)
         var candidates = Set(best.lazy.filter { allowed($0.key) && $0.value.z >= zGate }.map(\.key))
-        for word in words where query.coverage[word.file, default: 0] >= 0.5 { candidates.insert(word.file) }
-        let scored = candidates.map { file -> (file: Int64, score: Double) in
-            var score = meaningWeight * max(best[file]?.z ?? 0, 0)
-                + wordsWeight * pow(query.coverage[file] ?? 0, 1.5)
+        for word in words where coverage[word.file, default: 0] >= 0.5 { candidates.insert(word.file) }
+        var scored: [(file: Int64, score: Double)] = []
+        scored.reserveCapacity(candidates.count)
+        for file in candidates {
+            let semanticScore = meaningWeight * max(best[file]?.z ?? 0, 0)
+            let keywordScore = wordsWeight * pow(coverage[file] ?? 0, 1.5)
+            var score = semanticScore + keywordScore
             if let kind = fileKind[file], hinted.contains(kind) { score += 1 }
-            return (file, score)
-        }.sorted { $0.score > $1.score || ($0.score == $1.score && $0.file < $1.file) }
+            scored.append((file, score))
+        }
+        scored.sort { left, right in
+            left.score > right.score || (left.score == right.score && left.file < right.file)
+        }
         let wordRank = Dictionary(uniqueKeysWithValues: words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) })
         var selected: [Selection] = []
         for candidate in scored.prefix(limit) {

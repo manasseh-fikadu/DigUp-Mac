@@ -85,6 +85,27 @@ import Testing
         }
     }
 
+    @Test func changingFilterOrderCannotLeakKeywordBoostsIntoSemanticResults() throws {
+        try withStore { store in
+            try store.db.transaction {
+                for number in 0..<1000 {
+                    _ = try add(number, to: store, kind: number < 100 ? .image : .doc,
+                                text: number <= 100 ? "budget review" : "unrelated notes",
+                                vector: vector(number == 100 ? 0.6 : 0))
+                }
+            }
+            let searcher = try Searcher(store: store)
+            let filtered = try #require(searcher.search("budget", queryVector: vector(1), kinds: [.doc]).first)
+            let all = try #require(searcher.search("budget", queryVector: vector(1)).first)
+            let fresh = try Searcher(store: store)
+            let expected = try #require(fresh.search("budget", queryVector: vector(1)).first)
+            #expect(filtered.path == all.path)
+            #expect(filtered.score > all.score)
+            #expect(all.score == expected.score)
+            #expect(all.keywordRank == nil)
+        }
+    }
+
     @Test func hydrationSplitsLargePagesBelowTheSQLiteBindLimit() throws {
         try withStore { store in
             try store.db.transaction {
