@@ -13,9 +13,10 @@ with the original MIT license and author attribution preserved.
 
 ## Install the DMG
 
-**Release status:** no DMG has been uploaded for this version yet. The source was prepared on a Linux VPS; the
-native build, UI verification and DMG packaging still need to be completed on a Mac. You can build your own using
-[Build on your Mac](#build-on-your-mac). Once a DMG is published:
+**Release status:** no DMG has been uploaded for this version yet. [Native Mac CI](https://github.com/manasseh-fikadu/DigUp-Mac/actions/runs/38768848550)
+has passed the release build, 114 tests, bundle signature verification and large-index benchmarks. Interactive UI
+verification and DMG packaging remain to be done on your Mac. Follow [Build on your Mac](#build-on-your-mac).
+Once a DMG is published:
 
 1. Open [this repository's Releases](https://github.com/manasseh-fikadu/DigUp-Mac/releases) and download
    `DigUp-<version>.dmg` from the release's **Assets**. Your Mac needs an M-series chip and macOS 14 or later.
