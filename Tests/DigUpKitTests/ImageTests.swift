@@ -1,14 +1,12 @@
 import Foundation
 import Testing
 @testable import DigUpKit
-#if canImport(ImageIO)
 import CoreGraphics
 import ImageIO
-#endif
 
 /// Pictures in the formats stb doesn't read, and a JPEG (Pictures/, from scripts/testbed/make_test_pictures.swift): a
 /// 400×240 pattern of four colored quadrants (red, green above blue, yellow) with a DateTimeOriginal, stored turned
-/// (orientation 6) except the AVIF. ImageIO reads them on macOS, stb or ffmpeg elsewhere: each must hand the model the
+/// (orientation 6) except the AVIF. ImageIO reads them: each must hand the model the
 /// picture as it's shown, and the date.
 @Suite struct ImageTests {
     static let pictures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Pictures")
@@ -42,7 +40,6 @@ import ImageIO
         }
     }
 
-    #if canImport(AppKit)
     @Test func vectorPicturesAreDrawn() throws {
         // An SVG, which ImageIO doesn't open: red on the left, blue on the right, 800×400 points.
         let chart = folder.appendingPathComponent("chart.svg")
@@ -64,7 +61,6 @@ import ImageIO
             #expect("\(error)" == "small image 24×24")
         }
     }
-    #endif
 
     /// A picture's size and the color in the middle of each quadrant (top left, top right, bottom left, bottom right),
     /// as R, G, B or Y.
@@ -86,7 +82,6 @@ import ImageIO
 
     /// Packed 8-bit RGB, decoded by the system's own reader.
     static func pixels(_ path: String) throws -> (Int, Int, [UInt8]) {
-        #if canImport(ImageIO)
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ExtractError.unreadable(path) }
         let (width, height) = (image.width, image.height)
@@ -100,9 +95,5 @@ import ImageIO
         rgb.reserveCapacity(width * height * 3)
         for i in stride(from: 0, to: rgba.count, by: 4) { rgb += rgba[i..<(i + 3)] }
         return (width, height, rgb)
-        #else
-        guard let image = RGBImage.load(path) else { throw ExtractError.unreadable(path) }
-        return (image.width, image.height, image.pixels)
-        #endif
     }
 }

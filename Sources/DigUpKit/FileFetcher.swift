@@ -1,6 +1,3 @@
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import Foundation
 
 /// Downloads one model file into `<folder>/<name>.partial`, resuming from what's there (an HTTP range, kept across
@@ -48,9 +45,7 @@ public final class FileFetcher: NSObject, URLSessionDataDelegate, @unchecked Sen
         }
         if written == file.bytes { return done(.downloaded(partial)) }
         let configuration = URLSessionConfiguration.ephemeral
-        #if !canImport(FoundationNetworking)
         configuration.waitsForConnectivity = true        // offline: wait for the network instead of failing
-        #endif                                           // (elsewhere it fails, and the caller tries again)
         configuration.timeoutIntervalForRequest = 60     // no bytes for a minute: fail, then retry from here
         configuration.timeoutIntervalForResource = 7 * 24 * 3600
         configuration.urlCache = nil

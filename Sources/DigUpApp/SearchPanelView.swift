@@ -33,9 +33,7 @@ struct SearchPanelView: View {
                 .help(controller.isCode ? "Searching your code" : "")
             // With code search on, one example is code's: nothing else in the panel shows "code:".
             SearchField(text: $controller.query, fontSize: 22,
-                        placeholder: controller.model.hasCode
-                            ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
-                            : "Describe it: “payment error screenshot”, “zebra in a video”…") {
+                        placeholder: "Find a file by what you remember…") {
                 controller.field = $0
             }
             if controller.phase == .words, controller.encoder == .starting {
@@ -344,11 +342,13 @@ struct ThumbnailView: View {
         }
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: side > 60 ? 8 : 6, style: .continuous))
-        .task(id: url) {
+        .task(id: "\(url.path) \(side)@\(scale) \(iconOnly)") {
             guard !iconOnly else { return }
-            image = Thumbnails.shared.cached(url, side: side)
+            image = Thumbnails.shared.cached(url, side: side, scale: scale)
             if image == nil {
-                image = await Thumbnails.shared.load(url, side: side, scale: scale)
+                let loadedImage = await Thumbnails.shared.load(url, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = loadedImage
             }
         }
     }
@@ -471,7 +471,7 @@ final class FileDragView: NSView, NSDraggingSource {
         let item = NSDraggingItem(pasteboardWriter: url as NSURL)
         let point = convert(down.locationInWindow, from: nil)
         let side: CGFloat = 44
-        let image = Thumbnails.shared.cached(url, side: ThumbnailView.side) ?? NSWorkspace.shared.icon(forFile: url.path)
+        let image = Thumbnails.shared.cached(url, side: ThumbnailView.side, scale: window?.backingScaleFactor ?? 2) ?? NSWorkspace.shared.icon(forFile: url.path)
         item.setDraggingFrame(NSRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side),
                               contents: image)
         beginDraggingSession(with: [item], event: down, source: self)

@@ -1,8 +1,5 @@
 import DigUpKit
 import Foundation
-#if os(Windows)
-import WinSDK
-#endif
 
 /// `digup index-service`: the app's indexing helper, one process per stretch of work.
 ///
@@ -184,14 +181,7 @@ final class IndexService: @unchecked Sendable {
 
     /// No process has this id now.
     private static func isGone(_ pid: Int32) -> Bool {
-        #if os(Windows)
-        guard let process = OpenProcess(DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, DWORD(pid)) else { return true }
-        defer { CloseHandle(process) }
-        var code: DWORD = 0
-        return GetExitCodeProcess(process, &code) && code != 259   // STILL_ACTIVE
-        #else
         return kill(pid, 0) != 0 && errno == ESRCH
-        #endif
     }
 
     /// A part's chosen folders that are there and readable right now; also what `pending` and the counts look at.

@@ -22,6 +22,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     var isVisible: Bool { window?.isVisible == true }
 
     func show(query: String? = nil, kind: ResultGroupKind? = nil) {
+        app.engine.prewarm()
         let window = self.window ?? makeWindow()
         if let query {
             search.filter = kind
@@ -65,6 +66,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             QLPreviewPanel.shared().orderOut(nil)
         }
         removeKeyMonitor()
+        search.reset()
         PreviewPlayback.shared.stop()
         window?.contentView = nil
         window = nil
@@ -135,6 +137,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kinds[index]
         case 26 where modifiers == .command && app.model.hasCode:   // ⌘7: code
             search.filter = .code
+        case 37 where modifiers == .command:   // ⌘L: focus search
+            search.field?.window?.makeFirstResponder(search.field)
+            search.field?.currentEditor()?.selectAll(nil)
+            search.editing()
         case 8 where modifiers == .command && search.navigated:   // ⌘C
             guard let row = search.selectedRow else { return false }
             NSPasteboard.general.clearContents()
@@ -198,6 +204,10 @@ final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
 /// The window's query: keyword and meaning results together after a short pause in typing, optionally of one kind.
 @Observable
 final class SearchModel {
+    enum Layout: String, CaseIterable {
+        case list, grid
+    }
+
     var query = "" {
         didSet { if query != oldValue { run() } }
     }
@@ -208,15 +218,20 @@ final class SearchModel {
     /// Results per kind for the query, whatever the filter (the counts on the kind buttons).
     private(set) var counts: [ResultGroupKind: Int] = [:]
     private(set) var hasResults = false
+    private(set) var isSearching = false
+    private(set) var wordsOnly = false
     /// What the window shows instead of results: "code:" alone (what to type), or code search that's off.
     private(set) var codePhase: SearchPhase?
     var selection: String?
     var showWeaker = false
     var showsPreview = true
+    var layout = Layout(rawValue: AppSettings.defaults.string(forKey: "resultLayout") ?? "") ?? .list {
+        didSet { AppSettings.defaults.set(layout.rawValue, forKey: "resultLayout") }
+    }
     /// You moved the selection with the arrow keys since the last edit: Space and ← → act on results then.
     private(set) var navigated = false
     /// The grid's columns right now (↑ ↓ move by a row).
-    var columns = 4
+    var columns = 1
     @ObservationIgnored weak var field: NSTextField?
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private var generation = 0
@@ -227,7 +242,7 @@ final class SearchModel {
     }
 
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
-    var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
+    var rows: [ResultRow] { showWeaker ? results.ranked + results.weaker : results.ranked }
 
     /// A search of code: the Code filter, or "code:" typed.
     var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
@@ -263,11 +278,22 @@ final class SearchModel {
         navigated = true
     }
 
+    /// Closing the window releases its results and prevents late queries from retaining them.
+    func reset() {
+        query = ""
+        task?.cancel()
+        task = nil
+        selection = nil
+        field = nil
+    }
+
     private func run() {
         generation += 1
         let current = generation
         task?.cancel()
         navigated = false
+        isSearching = false
+        wordsOnly = false
         let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let code = isCode
         let text = CodeQuery.text(of: typed) ?? typed
@@ -276,51 +302,49 @@ final class SearchModel {
             results = .empty
             counts = [:]
             hasResults = false
+            selection = nil
             return
         }
         if code, !engine.hasCode || text.isEmpty {
             results = .empty
             counts = [:]
             hasResults = false
+            selection = nil
             codePhase = engine.hasCode ? .codeHint : .codeOff
             return
         }
-        engine.prewarm()
-        engine.embedAhead(text, code: code)
         let filter = self.filter
-        let showAt = ContinuousClock.now + SearchPanelController.typingPause
-        if code {
-            task = Task {
-                let vector = await engine.embedQuery(text, code: true)
-                guard !Task.isCancelled, current == generation else { return }
-                let hits = await engine.search(text, vector: vector, prefixLast: false, limit: 120, code: true)
-                try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
-                guard !Task.isCancelled, current == generation else { return }
-                counts = [.code: Searcher.strongCount(hits)]
-                results = ResultSet(hits, query: text)
-                showWeaker = false
-                if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
-                hasResults = true
-                log("window: code \"\(text)\": \(results.ranked.count) results + \(results.weaker.count) weaker")
-            }
-            return
-        }
+        isSearching = true
         task = Task {
-            let vector = await engine.embedQuery(text)
+            defer { if current == generation { isSearching = false } }
+            // Debounce before doing work, so rapid typing does not queue scans of the whole index.
+            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
             guard !Task.isCancelled, current == generation else { return }
-            let all = await engine.search(text, vector: vector, prefixLast: false, limit: 120)
-            let shown = filter == nil ? all : await engine.search(text, vector: vector, prefixLast: false,
-                                                                    kinds: filter!.kinds, limit: 120)
-            try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
+            let words = await engine.search(text, vector: nil, prefixLast: true,
+                                            kinds: code ? nil : filter?.kinds, limit: 120, code: code)
+            guard !Task.isCancelled, current == generation else { return }
+            results = ResultSet(words, query: text)
+            showWeaker = false
+            selection = rows.first?.id
+            counts = [:]
+            hasResults = true
+
+            engine.embedAhead(text, code: code)
+            let vector = await engine.embedQuery(text, code: code)
+            guard !Task.isCancelled, current == generation else { return }
+            let all = await engine.search(text, vector: vector, prefixLast: false, limit: 120, code: code)
+            guard !Task.isCancelled, current == generation else { return }
+            let shown = code || filter == nil ? all
+                : await engine.search(text, vector: vector, prefixLast: false, kinds: filter!.kinds, limit: 120)
             guard !Task.isCancelled, current == generation else { return }
             var counts: [ResultGroupKind: Int] = [:]
             for hit in all.prefix(Searcher.strongCount(all)) { counts[ResultGroupKind(hit.kind), default: 0] += 1 }
             self.counts = counts
             results = ResultSet(shown, query: text)
-            showWeaker = false
+            wordsOnly = vector == nil
             if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
             hasResults = true
-            log("window: \"\(text)\"\(filter.map { " in \($0.title)" } ?? ""): \(results.ranked.count) results "
+            log("window: \"\(text)\"\(code ? " in code" : filter.map { " in \($0.title)" } ?? ""): \(results.ranked.count) results "
                 + "+ \(results.weaker.count) weaker")
         }
     }
@@ -373,6 +397,9 @@ struct SearchWindowView: View {
                         .frame(width: 22)
                     SearchField(text: $search.query, fontSize: 18, placeholder: placeholder,
                                 onMake: { search.field = $0 }, onFocus: { fieldFocused = $0 })
+                    if search.isSearching {
+                        ProgressView().controlSize(.small).help("Searching your files")
+                    }
                     if !search.query.isEmpty {
                         Button {
                             search.query = ""
@@ -381,6 +408,7 @@ struct SearchWindowView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Clear")
+                        .accessibilityLabel("Clear search")
                     }
                 }
                 .padding(.horizontal, 12)
@@ -390,6 +418,17 @@ struct SearchWindowView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.accentColor.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
                 .animation(.easeOut(duration: 0.15), value: fieldFocused)
+                Picker("Result layout", selection: $search.layout) {
+                    Image(systemName: "list.bullet").tag(SearchModel.Layout.list)
+                        .accessibilityLabel("List view")
+                    Image(systemName: "square.grid.2x2").tag(SearchModel.Layout.grid)
+                        .accessibilityLabel("Grid view")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 76)
+                .disabled(search.isCode)
+                .help("List or picture grid")
                 Button {
                     search.showsPreview.toggle()
                 } label: {
@@ -399,6 +438,7 @@ struct SearchWindowView: View {
                 }
                 .buttonStyle(.plain)
                 .help(search.showsPreview ? "Hide Preview" : "Show Preview")
+                .accessibilityLabel(search.showsPreview ? "Hide preview" : "Show preview")
                 Button {
                     app.showSettings()
                 } label: {
@@ -408,10 +448,13 @@ struct SearchWindowView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Settings (⌘,)")
+                .accessibilityLabel("Settings")
             }
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
-            KindFilters(search: search, showsCode: model.hasCode)
+            ScrollView(.horizontal, showsIndicators: false) {
+                KindFilters(search: search, showsCode: model.hasCode)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 10)
@@ -439,6 +482,12 @@ struct SearchWindowView: View {
             CodeOffOrHint(phase: phase, search: search) { app.chooseCodeFolders() }
         } else if !search.hasResults {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if search.results.isEmpty && search.isSearching {
+            VStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("Looking for matches…").font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if search.results.isEmpty {
             EmptyState(symbol: search.isCode ? FileKind.code.symbol : "magnifyingglass",
                        title: "No good matches for “\(search.query.trimmingCharacters(in: .whitespaces))”",
@@ -446,6 +495,8 @@ struct SearchWindowView: View {
                            : "Try describing what's in it: what you'd see or hear, or words you remember.")
         } else if search.isCode {
             CodeResultsList(search: search)
+        } else if search.layout == .list {
+            FileResultsList(search: search)
         } else {
             ResultsGrid(search: search)
         }
@@ -462,6 +513,11 @@ struct SearchWindowView: View {
                 .lineLimit(1)
                 .help("Folders and indexing")
             Spacer()
+            if search.isSearching {
+                Text("Searching…")
+            } else if search.wordsOnly, search.hasResults {
+                Text(model.meaningUnavailable ?? "Matching words only").lineLimit(1)
+            }
             if search.hasResults, !search.query.isEmpty {
                 Text(model.resultsCaveat ?? resultCount).lineLimit(1)
             }
@@ -479,14 +535,13 @@ struct SearchWindowView: View {
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 14)
-        .frame(height: 28)
+        .frame(height: 32)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     /// Examples of what to type: code's with the Code chip on, and one of them with code search on (as the panel's).
     private var placeholder: String {
-        if search.filter == .code { return "Describe the code: “retry a request with backoff”, a name in it…" }
-        return model.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
-            : "Describe it: “receipt from the hardware store”, “zebra in a video”…"
+        search.isCode ? "What does the code do?" : "Find a file by what you remember…"
     }
 
     private var resultCount: String {
@@ -545,6 +600,79 @@ private struct KindFilters: View {
         .buttonStyle(.plain)
         .help("\(title) (⌘\(number))")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// A compact Finder-style list is the default: small thumbnails, matched text and the containing folder.
+/// The picture grid remains one click away for visual searches.
+private struct FileResultsList: View {
+    @Bindable var search: SearchModel
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 3) {
+                    ForEach(search.results.ranked) { row in item(row) }
+                    if !search.results.weaker.isEmpty {
+                        WeakerToggle(count: search.results.weaker.count, expanded: search.showWeaker) {
+                            search.showWeaker.toggle()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        if search.showWeaker {
+                            ForEach(search.results.weaker) { row in item(row).opacity(0.85) }
+                        }
+                    }
+                }
+                .padding(10)
+            }
+            .onChange(of: search.selection) { _, id in
+                if let id { proxy.scrollTo(id) }
+            }
+            .onAppear { search.columns = 1 }
+        }
+    }
+
+    private func item(_ row: ResultRow) -> some View {
+        HStack(spacing: 12) {
+            ThumbnailView(url: row.url, side: 40)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(row.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let place = row.place { PlaceBadge(text: place) }
+                }
+                if let excerpt = row.excerpt, row.matchedWords {
+                    Text(highlighted(excerpt, size: 11))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text(row.folder)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+            Spacer(minLength: 4)
+            Image(systemName: row.kind.symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .frame(width: 20)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(row.id == search.selectedRow?.id ? Color.accentColor.opacity(0.14) : Color.clear))
+        .contentShape(Rectangle())
+        .id(row.id)
+        .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: { search.select(row) },
+                              onOpen: { search.open(row) }))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)")
+        .accessibilityAddTraits(row.id == search.selectedRow?.id ? .isSelected : [])
     }
 }
 
@@ -777,10 +905,14 @@ private struct MomentThumbnail: View {
                     .frame(width: 56, height: 56)
             }
         }
-        .task(id: row.previewKey) {
+        .task(id: Previews.shared.key(row, 230, scale)) {
             let side: CGFloat = 230
-            image = Previews.shared.cached(row, side: side)
-            if image == nil { image = await Previews.shared.load(row, side: side, scale: scale) }
+            image = Previews.shared.cached(row, side: side, scale: scale)
+            if image == nil {
+                let loadedImage = await Previews.shared.load(row, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = loadedImage
+            }
         }
     }
 }
@@ -849,18 +981,21 @@ private struct SearchHome: View {
     var body: some View {
         VStack(spacing: 0) {
             BrandMark()
-            Text("Describe it. Dig it up.")
+            Text("It's somewhere on your Mac.")
                 .font(.system(size: 24, weight: .bold))
                 .padding(.top, 18)
-            Text("Type what you remember in the search field above: what's in it, what it looks or sounds like, or "
-                 + "words from it.")
+            Text("Describe a picture, a passage, or a moment. DigUp finds the file.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 440)
                 .padding(.top, 6)
-            Text("TRY")
+            Label("Private. On your Mac.", systemImage: "lock.shield")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Brand.leaf)
+                .padding(.top, 12)
+            Text("TRY A SEARCH")
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(.tertiary)
@@ -905,7 +1040,9 @@ private struct SearchHome: View {
 
     /// With code search on, one of code's too.
     private var examples: [(text: String, kind: ResultGroupKind)] {
-        Self.examples + (model.hasCode ? [("code: where the settings are saved", .code)] : [])
+        if search.isCode { return [("code: retry a failed request", .code), ("code: save the settings", .code)] }
+        let examples = search.filter.map { selected in Self.examples.filter { $0.kind == selected } } ?? Self.examples
+        return examples + (model.hasCode && search.filter == nil ? [("code: where the settings are saved", .code)] : [])
     }
 
     private var folders: String {

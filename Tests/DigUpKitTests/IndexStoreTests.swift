@@ -1,12 +1,7 @@
-#if canImport(CryptoKit)
 import CryptoKit
-#endif
 import Foundation
 import Testing
 @testable import DigUpKit
-#if os(Windows)
-import WinSDK
-#endif
 
 @Suite struct IndexStoreTests {
     let folder: URL = {
@@ -62,7 +57,6 @@ import WinSDK
         #expect(states == ["/a/stuck.pdf": "failed", "/a/book.pdf": "done"])
     }
 
-    #if canImport(AppKit)
     @Test func picturesThatCouldntBeReadAreReadOnceMore() throws {
         // An SVG skipped by an older DigUp as "small image 0×0" (ImageIO couldn't open it): AppKit draws it now.
         let store = try IndexStore(directory: folder)
@@ -74,7 +68,6 @@ import WinSDK
         #expect(try store.pending(limit: nil).map(\.path) == ["/a/chart.svg"])
         #expect(try store.readAgainOnce() == 0)
     }
-    #endif
 
     @Test func modelFileHashesStreamInPieces() throws {
         let small = folder.appendingPathComponent("abc")
@@ -141,11 +134,7 @@ import WinSDK
         var chosen: [URL] = []
         for name in ["내 드라이브", "Café"] {
             let onDisk = folder.path + "/" + name.precomposedStringWithCanonicalMapping
-            #if os(Windows)
-            try FileManager.default.createDirectory(atPath: onDisk, withIntermediateDirectories: false)
-            #else
             #expect(mkdir(onDisk, 0o755) == 0)   // FileManager would decompose the name
-            #endif
             try Data("notes from the trip".utf8).write(to: URL(fileURLWithPath: onDisk + "/notes.txt"))
             chosen.append(URL(fileURLWithPath: onDisk).standardizedFileURL)
         }
@@ -161,12 +150,5 @@ import WinSDK
 
 /// Sets an environment variable of this process, or removes it (nil).
 private func setEnvironment(_ name: String, _ value: String?) {
-    #if os(Windows)
-    _ = name.withCString(encodedAs: UTF16.self) { name in
-        guard let value else { return SetEnvironmentVariableW(name, nil) }
-        return value.withCString(encodedAs: UTF16.self) { SetEnvironmentVariableW(name, $0) }
-    }
-    #else
     if let value { setenv(name, value, 1) } else { unsetenv(name) }
-    #endif
 }

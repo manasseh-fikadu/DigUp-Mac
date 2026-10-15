@@ -105,7 +105,7 @@ enum DocExtractor {
     static func chunks(_ text: String, size: Int = 1800, overlap: Int = 200, limit: Int) -> [String] {
         let clean = text
             // A plain string, so Swift puts the real tab and no-break space in the class: ICU doesn't read \u{…}, and
-            // an invalid pattern leaves the text as it is on macOS but empties it on Linux (found by the port).
+            // keep an invalid regular expression from losing document text.
             .replacingOccurrences(of: "[ \t\u{00A0}]+", with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\n\s*\n\s*\n+"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)

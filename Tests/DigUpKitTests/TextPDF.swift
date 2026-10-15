@@ -49,7 +49,6 @@ enum TextPDF {
     }
 }
 
-#if canImport(Vision)
 import CoreGraphics
 import CoreText
 
@@ -76,4 +75,3 @@ enum ScannedPDF {
         pdf.closePDF()
     }
 }
-#endif

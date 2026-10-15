@@ -37,21 +37,16 @@ import Testing
         #expect(measured.costs.image == 0.2)                         // what it measured wins
     }
 
-    /// An RTX 4050 laptop's check, timed at a bad moment, took it for 30 times slower than the M4 Pro; its first index
-    /// then went about as fast as the M4 Pro's (142 screenshots in 47 s, 189 PDF pages in 63 s, 54 minutes of video in
-    /// 96 s). Its pictures, not measured yet, follow the kinds that were.
     @Test func aCheckTimedAtABadMomentIsPutRightByIndexing() throws {
         var measured = MeasuredCosts()
-        let kinds = ["image", "screenshot", "pdfPage", "docChunk", "audioSecond", "videoSecond", "codeStretch"]
-        measured.speed = MeasuredCosts.Speed(embedding: 1, ocr: 1, device: "gpu")
-        measured.speed?.kinds = Dictionary(uniqueKeysWithValues: kinds.map { ($0, 30) })
-        #expect(abs(measured.costs.image - Costs().image * 30) < 1e-9)
+        measured.speed = MeasuredCosts.Speed(embedding: 10, ocr: 10)
+        #expect(abs(measured.costs.image - Costs().image * 10) < 1e-9)
         #expect(measured.pace == nil)
         measured.add("screenshot", units: 142, seconds: 47)
         measured.add("pdfPage", units: 189, seconds: 63)
         measured.add("videoSecond", units: 3240, seconds: 96)
         let pace = try #require(measured.pace)
-        #expect(pace > 0.03 && pace < 0.1)   // the check was 10 to 30 times off
+        #expect(pace > 0.09 && pace < 0.3)
         #expect(measured.costs.image > 0.1 && measured.costs.image < 0.4)
         #expect(measured.costs.screenshot == 47.0 / 142)
     }
@@ -61,6 +56,17 @@ import Testing
         measured.add("image", units: 300, seconds: 300)   // 1 s a picture (a hot Mac, say)
         measured.add("image", units: 20, seconds: 2)      // then 0.1 s: past ten times enough, the past is halved
         #expect(measured.tallies["image"] == MeasuredCosts.Tally(seconds: 152, units: 170))
+    }
+
+    @Test func existingCostsDecodeAfterRemovingDeviceSelection() throws {
+        let saved = Data("""
+            {"speed":{"embedding":1.5,"ocr":2,"kinds":{"image":40},"device":"cpu","checks":3},
+             "tallies":{"docChunk":{"seconds":9,"units":30}}}
+            """.utf8)
+        let measured = try JSONDecoder().decode(MeasuredCosts.self, from: saved)
+        #expect(measured.speed == MeasuredCosts.Speed(embedding: 1.5, ocr: 2))
+        #expect(measured.tallies["docChunk"] == MeasuredCosts.Tally(seconds: 9, units: 30))
+        #expect(measured.costs.docChunk == 0.3)
     }
 
     @Test func indexingKeepsWhatItCostsBesideTheIndex() throws {
@@ -81,8 +87,5 @@ import Testing
         let saved = MeasuredCosts.load(from: folder)
         #expect(saved.speed == MeasuredCosts.Speed(embedding: 1.5, ocr: 1))
         #expect(saved.tallies["docChunk"]?.units == 2)   // the speed joined what was there
-        MeasuredCosts.setSpeed(MeasuredCosts.Speed(embedding: 1, ocr: 1, kinds: ["image": 2], device: "cpu"), in: folder,
-                               forgetTallies: true)
-        #expect(MeasuredCosts.load(from: folder).tallies.isEmpty)   // measured on the other device
     }
 }

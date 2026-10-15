@@ -23,7 +23,7 @@ struct MediaPiece: Sendable {
     var end: Double
 }
 
-/// Audio for the model: 30 s windows of 16 kHz mono (`windows`: AVFoundation on macOS, ffmpeg elsewhere), written as WAV.
+/// Audio for the model: 30 s windows of 16 kHz mono (`windows`: AVFoundation), written as WAV.
 enum AudioExtractor {
     static let sampleRate = 16_000.0
 
@@ -48,7 +48,7 @@ enum AudioExtractor {
     }
 }
 
-/// Video for the model: a keyframe per shot (`keyframes`: AVFoundation on macOS, ffmpeg elsewhere); the soundtrack goes
+/// Video for the model: a keyframe per shot (`keyframes`: AVFoundation); the soundtrack goes
 /// through `AudioExtractor`.
 enum VideoExtractor {}
 

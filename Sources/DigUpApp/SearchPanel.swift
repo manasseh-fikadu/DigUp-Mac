@@ -49,6 +49,7 @@ final class SearchPanelController {
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private unowned let app: AppController
     @ObservationIgnored private var window: SearchPanelWindow?
+    @ObservationIgnored private var contentInstalled = false
     @ObservationIgnored weak var field: NSTextField?
     @ObservationIgnored private var generation = 0
     /// The generation whose final (meaning) results are showing; late keyword results must not replace them.
@@ -100,6 +101,8 @@ final class SearchPanelController {
         shownAt = started
         engine.prewarm()
         let window = self.window ?? makeWindow()
+        if !contentInstalled { installContent(in: window) }
+        if phase == .words { queryChanged() }
         placeWindow(window)
         if AppController.offscreen { return }
         // Activate for real: a background app's main thread drops to efficiency cores (App Nap), which can make
@@ -135,11 +138,16 @@ final class SearchPanelController {
             QLPreviewPanel.shared().orderOut(nil)
         }
         removeKeyMonitor()
+        generation += 1
+        meaningTask?.cancel()
+        meaningTask = nil
         PreviewPlayback.shared.stop()
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
-        Thumbnails.shared.clear()
-        Previews.shared.clear()
+        if !app.searchWindow.isVisible {
+            Thumbnails.shared.clear()
+            Previews.shared.clear()
+        }
         guard let window, window.isVisible, !fading else { return }
         fading = true
         window.ignoresMouseEvents = true
@@ -152,6 +160,10 @@ final class SearchPanelController {
                 self.fading = false
                 window.orderOut(nil)
                 window.canHide = true
+                window.makeFirstResponder(nil)
+                window.contentView = nil
+                self.contentInstalled = false
+                self.field = nil
             }
         }
     }
@@ -192,18 +204,19 @@ final class SearchPanelController {
             show(hits, query: text, phase: .words)
             log("search \"\(typed)\": words \(hits.count) hits in \(ms(since: started))")
         }
-        // Meaning results show once typing pauses, but they're computed now (embedding, then search), so they're
-        // ready by then: the pause is the whole wait.
-        engine.embedAhead(text, code: code)
+        // Match words immediately; wait for a pause before using the GPU and scanning all vectors.
         let showAt = ContinuousClock.now + Self.typingPause   // counted from the keystroke, not from when the task runs
         meaningTask = Task {
+            do { try await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous) }
+            catch { return }
+            guard !Task.isCancelled, current == generation else { return }
+            engine.embedAhead(text, code: code)
             let embedStarted = Date()
             let vector = await engine.embedQuery(text, code: code)
             guard !Task.isCancelled, current == generation else { return }
             let searchStarted = Date()
             let hits = await engine.search(text, vector: vector, prefixLast: false, code: code)
             let searched = Date()
-            try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
             guard !Task.isCancelled, current == generation else { return }
             finalGeneration = current
             show(hits, query: text, phase: vector == nil ? .wordsOnly : .meaning)
@@ -442,11 +455,17 @@ final class SearchPanelController {
 
     private func makeWindow() -> SearchPanelWindow {
         let window = SearchPanelWindow()
+        installContent(in: window)
+        self.window = window
+        return window
+    }
+
+    /// Keep the panel and its last query, but recreate its views after hiding so @State images can be released.
+    private func installContent(in window: SearchPanelWindow) {
         let hosting = NSHostingView(rootView: SearchPanelView(controller: self))
         hosting.sizingOptions = []
         window.contentView = Self.background(containing: hosting)
-        self.window = window
-        return window
+        contentInstalled = true
     }
 
     private var desiredHeight: CGFloat {

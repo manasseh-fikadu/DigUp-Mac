@@ -9,6 +9,7 @@ import Sparkle
 /// "gentle reminders"): it waits in the menu ("Update to DigUp 0.6.1…"), as a dot on the menubar mark, and in the
 /// window's status bar, until you open it. Checks you ask for show Sparkle's window at once.
 final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
+    private static let releases = URL(string: "https://github.com/manasseh-fikadu/DigUp-Mac/releases")!
     private let model: AppModel
     private var controller: SPUStandardUpdaterController!
     /// Sparkle's window closed: the Dock icon goes unless one of DigUp's windows is open.
@@ -23,6 +24,10 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
     /// Dev and test runs (their own defaults suite) don't check: Sparkle keeps its state in the app's real defaults.
     /// `-debugUpdates YES` lets one check anyway.
     func start() {
+        guard isConfigured else {
+            log("updates: manual downloads from GitHub Releases; no signed update feed configured")
+            return
+        }
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: "defaultsSuite") == nil || defaults.bool(forKey: "debugUpdates") else { return }
         controller.startUpdater()
@@ -31,19 +36,32 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
     }
 
     var automaticallyChecks: Bool {
-        get { controller.updater.automaticallyChecksForUpdates }
-        set { controller.updater.automaticallyChecksForUpdates = newValue }
+        get { isConfigured && controller.updater.automaticallyChecksForUpdates }
+        set { if isConfigured { controller.updater.automaticallyChecksForUpdates = newValue } }
     }
 
-    var canCheck: Bool { controller.updater.canCheckForUpdates }
+    /// Each distributor supplies their own feed and signing key. Source builds use manual releases.
+    var isConfigured: Bool {
+        ["SUFeedURL", "SUPublicEDKey"].allSatisfy {
+            guard let value = Bundle.main.object(forInfoDictionaryKey: $0) as? String else { return false }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    var canCheck: Bool { !isConfigured || controller.updater.canCheckForUpdates }
 
     /// "Check for Updates…" and the waiting update's menu item: Sparkle's window, in front.
     func checkNow() {
+        guard isConfigured else {
+            NSWorkspace.shared.open(Self.releases)
+            return
+        }
         controller.checkForUpdates(nil)
     }
 
     /// A check in the background, as the daily one (for `-debugUpdateCheck`).
     func checkInBackground() {
+        guard isConfigured else { return }
         controller.updater.checkForUpdatesInBackground()
     }
 

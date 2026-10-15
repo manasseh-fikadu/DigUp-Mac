@@ -47,20 +47,15 @@ final class Watchdog: @unchecked Sendable {
         StoppedFile(path: path, why: why).write(to: note)
         emit(["event": "error", "message": "watchdog: \(why): \(path ?? "no file being read")"])
         FileHandle.standardError.write(Data("watchdog: \(why): \(path ?? "no file being read")\n".utf8))
-        #if os(Windows)
-        exit(StoppedFile.exitCode)
-        #else
         _exit(StoppedFile.exitCode)
-        #endif
     }
 
     private static func size(_ bytes: UInt64) -> String {
         bytes >= 1 << 30 ? String(format: "%.0f GB", Double(bytes) / Double(1 << 30)) : "\(bytes >> 20) MB"
     }
 
-    /// This process's memory as Activity Monitor counts it: its footprint on a Mac, resident memory on Linux.
+    /// This process's memory footprint, as Activity Monitor counts it.
     static func footprint() -> UInt64? {
-        #if canImport(Darwin)
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -69,13 +64,6 @@ final class Watchdog: @unchecked Sendable {
             }
         }
         return result == KERN_SUCCESS ? info.phys_footprint : nil
-        #elseif os(Linux)
-        guard let statm = try? String(contentsOfFile: "/proc/self/statm", encoding: .utf8),
-              let pages = statm.split(separator: " ").dropFirst().first.flatMap({ UInt64($0) }) else { return nil }
-        return pages * UInt64(getpagesize())
-        #else
-        return nil
-        #endif
     }
 }
 

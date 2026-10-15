@@ -253,7 +253,6 @@ import Testing
         #expect(abs((hits.first?.cosine ?? 0) - 1) < 0.002)   // float16 rounding only
     }
 
-    #if canImport(Vision)
     @Test func aScannedPagesWordsAreFoundByKeywordSearch() throws {
         // A page that's only a picture of its text, as a scanner or a phone makes it: no text layer at all.
         try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
@@ -273,7 +272,6 @@ import Testing
         #expect(try store.pendingCount() == 1)
         #expect(try store.readAgainOnce() == 0)
     }
-    #endif
 
     // MARK: Files
 

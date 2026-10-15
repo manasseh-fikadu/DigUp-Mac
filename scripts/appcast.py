@@ -6,7 +6,7 @@
 Signs the DMG with Sparkle's sign_update (the EdDSA key in your login keychain, or --key-file) and puts a new item
 first in <appcast.xml>, which is made if it isn't there: the version and build of the app it was made from
 (build.noindex/DigUp.app), the oldest macOS it runs on, its download URL on GitHub Releases ($DOWNLOAD_BASE, by
-default https://github.com/ARahim3/DigUp/releases/download/v<version>/), and the notes if given (an HTML fragment
+default https://github.com/manasseh-fikadu/DigUp-Mac/releases/download/v<version>/), and the notes if given (an HTML fragment
 such as <ul><li>…</li></ul>, shown in the update window). An item of the same build is replaced. Publishing the DMG
 and the appcast is a separate step.
 """
@@ -50,7 +50,7 @@ def main():
     if not re.fullmatch(r'sparkle:edSignature="[^"]+" length="\d+"', signature):
         sys.exit(f"sign_update said: {signature}")
 
-    base = os.environ.get("DOWNLOAD_BASE", f"https://github.com/ARahim3/DigUp/releases/download/v{version}/")
+    base = os.environ.get("DOWNLOAD_BASE", f"https://github.com/manasseh-fikadu/DigUp-Mac/releases/download/v{version}/")
     url = base.rstrip("/") + "/" + os.path.basename(args.dmg)
     notes = ""
     if args.notes:

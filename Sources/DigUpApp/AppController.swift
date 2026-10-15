@@ -309,8 +309,10 @@ final class AppController {
                 .contains { $0 == true }
             if !open {
                 NSApp.setActivationPolicy(.accessory)
-                Thumbnails.shared.clear()
-                Previews.shared.clear()
+                if !panel.isVisible {
+                    Thumbnails.shared.clear()
+                    Previews.shared.clear()
+                }
             }
         }
     }

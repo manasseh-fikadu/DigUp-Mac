@@ -9,42 +9,36 @@ import SwiftUI
 /// that matched. Cached while the panel or a window is open, and dropped with the thumbnails when they close.
 final class Previews {
     static let shared = Previews()
-    private let cache = NSCache<NSString, NSImage>()
+    private let cache = ImageCache(megabytes: 48, count: 120)
     /// The text of a document's passage or a stretch of code (`Engine.text(ofSegment:code:)`), set when the app starts.
     var passage: (Int64, Bool) async -> String? = { _, _ in nil }
 
-    init() {
-        cache.totalCostLimit = 48 << 20
-    }
-
-    func cached(_ row: ResultRow, side: CGFloat) -> NSImage? {
-        cache.object(forKey: key(row, side))
+    func cached(_ row: ResultRow, side: CGFloat, scale: CGFloat) -> NSImage? {
+        cache.cached(key(row, side, scale))
     }
 
     func load(_ row: ResultRow, side: CGFloat, scale: CGFloat) async -> NSImage? {
-        if let image = cached(row, side: side) { return image }
-        var picture: CGImage?
-        if row.kind == .video, let loc = row.loc {
-            picture = await Self.frame(of: row.url, at: loc, pixels: side * scale)
-        } else if let page = row.page {
-            picture = await Self.page(page, of: row.url, pixels: side * scale, marking: row.foundWords + row.terms)
+        let url = row.url, kind = row.kind, loc = row.loc, page = row.page
+        let words = row.foundWords + row.terms
+        return await cache.load(key(row, side, scale), scale: scale) {
+            var picture: CGImage?
+            if kind == .video, let loc {
+                picture = await Self.frame(of: url, at: loc, pixels: side * scale)
+            } else if let page {
+                picture = await Self.page(page, of: url, pixels: side * scale, marking: words)
+            }
+            if picture == nil { picture = await Self.thumbnail(url, side: side, scale: scale) }
+            return picture
         }
-        if picture == nil { picture = await Self.thumbnail(row.url, side: side, scale: scale) }
-        guard let picture else { return nil }
-        let image = NSImage(cgImage: picture, size: NSSize(width: CGFloat(picture.width) / scale,
-                                                           height: CGFloat(picture.height) / scale))
-        cache.setObject(image, forKey: key(row, side), cost: picture.bytesPerRow * picture.height)
-        return image
     }
 
     func clear() {
-        cache.removeAllObjects()
+        cache.clear()
     }
 
     /// What a picture depends on: the file, the page or moment, and for a page the words marked on it.
-    func key(_ row: ResultRow, _ side: CGFloat) -> NSString {
-        "\(Int(side)) \(row.previewKey) \(row.page == nil ? "" : (row.foundWords + row.terms).joined(separator: " "))"
-            as NSString
+    func key(_ row: ResultRow, _ side: CGFloat, _ scale: CGFloat) -> String {
+        "\(side)@\(scale) \(row.previewKey) \(row.page == nil ? "" : (row.foundWords + row.terms).joined(separator: " "))"
     }
 
     /// The frame at `seconds` (within half a second, so it's a quick seek).
@@ -238,13 +232,15 @@ struct PreviewPicture: View {
         // The pane went away (the weaker-matches row selected, no results, the window's preview hidden): no sound
         // without its controls.
         .onDisappear { if PreviewPlayback.shared.isCurrent(row) { PreviewPlayback.shared.stop() } }
-        .task(id: Previews.shared.key(row, max(size.width, size.height))) {
+        .task(id: Previews.shared.key(row, max(size.width, size.height), scale)) {
             guard row.segment != .chunk, row.kind != .code else { return }
             let side = max(size.width, size.height)
-            image = Previews.shared.cached(row, side: side)
+            image = Previews.shared.cached(row, side: side, scale: scale)
             loaded = image != nil
             if image == nil {
-                image = await Previews.shared.load(row, side: side, scale: scale)
+                let loadedImage = await Previews.shared.load(row, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = loadedImage
                 loaded = true
             }
         }

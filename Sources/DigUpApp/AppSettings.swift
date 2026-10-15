@@ -78,7 +78,7 @@ nonisolated struct AppSettings: Sendable {
                 end: defaults.object(forKey: "indexHoursTo") == nil ? IndexHours.night.end
                     : defaults.integer(forKey: "indexHoursTo")),
             encoderIdleSeconds: defaults.object(forKey: "encoderIdleSeconds") == nil
-                ? 600 : max(1, defaults.double(forKey: "encoderIdleSeconds")),
+                ? 120 : max(1, defaults.double(forKey: "encoderIdleSeconds")),
             onboarded: defaults.bool(forKey: "onboarded"),
             codeRoots: folders(defaults, "codeRoots"),
             codeExcluded: folders(defaults, "codeExcludedFolders"),

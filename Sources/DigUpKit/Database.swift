@@ -1,9 +1,5 @@
 import Foundation
-#if canImport(SQLite3)
 import SQLite3   // the system's (3.51 on macOS 26, FTS5 built in)
-#else
-import CSQLite   // the amalgamation in Vendor/sqlite, with FTS5 (scripts/fetch-vendor.sh)
-#endif
 
 /// A thin wrapper over SQLite. One connection, used from one thread.
 public final class Database {

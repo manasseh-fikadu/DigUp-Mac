@@ -10,7 +10,7 @@ Moss palette.
   tiles, the D). `build.sh` compiles it into `Assets.car` with `actool`; `Info.plist`'s `CFBundleIconName` points at
   it. Without it macOS 26 draws the `.icns` shrunk inside a gray square. Older macOS uses the `.icns`
   (`CFBundleIconFile`; untested there).
-- `tray.svg`: the logo in the menubar and in the Windows and Linux tray: `appicon-small.svg` cropped to its rounded
+- `tray.svg`: the logo in the menu bar: `appicon-small.svg` cropped to its rounded
   square, without the drop shadow. `tray-dim.svg` (the tiles dimmed: indexing, their color coming back in a sweep as it
   goes) and `tray-paused.svg` (two bars in the D's place). Each is rendered to its `.png` at 64 px (WebKit, for the
   glow); `StatusIcon` (`Sources/DigUpApp/StatusMenu.swift`) and the shell's `tray_icon.rs` draw from those.

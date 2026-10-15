@@ -237,13 +237,15 @@ private struct GeneralSettings: View {
                 })) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Check for updates automatically")
-                        Text("Once a day DigUp asks GitHub for its newest version; nothing about your files is sent. "
-                             + "Updates install with one click.")
+                        Text(state.app.updates.isConfigured
+                             ? "Once a day DigUp checks for signed updates; nothing about your files is sent."
+                             : "This build uses manual updates. Check Now opens GitHub Releases.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .disabled(!state.app.updates.isConfigured)
                 LabeledContent {
                     Button("Check Now") { state.app.updates.checkNow() }
                 } label: {

@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The menubar icon: DigUp's logo (`Resources/AppIcon/tray.svg` and its `tray*.png`, as the Windows and Linux app's tray
-/// shows it). While the model downloads or files index, the tiles are dimmed and get their color back in a sweep from
+/// The menu bar icon: DigUp's logo (`Resources/AppIcon/tray.svg` and its `tray*.png`).
+/// While the model downloads or files index, the tiles regain their color in a sweep from
 /// the top, clockwise, as far as it has come; while indexing is paused, two bars take the D's place.
 enum StatusIcon {
     private static let logo = picture("tray"), dimmed = picture("tray-dim"), pausedLogo = picture("tray-paused")

@@ -90,7 +90,7 @@ struct ResultRow: Identifiable, Equatable {
     }
 
     /// What the preview shows: the moment or the page that matched, else the file.
-    var previewKey: String { "\(id)|\(loc.map { "\($0)" } ?? "")" }
+    var previewKey: String { "\(id)|\(modified.timeIntervalSince1970)|\(loc.map { "\($0)" } ?? "")" }
 
     var duration: Double? { info["duration"].flatMap(Double.init) }
 

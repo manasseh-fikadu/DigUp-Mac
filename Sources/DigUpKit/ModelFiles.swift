@@ -1,6 +1,4 @@
-#if canImport(CryptoKit)
 import CryptoKit
-#endif
 import Foundation
 
 /// The EmbeddingGemma 2 files the app runs: ggml-org's Q8_0 GGUF conversion at one pinned revision of the repo (made

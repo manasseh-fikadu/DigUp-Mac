@@ -15,26 +15,15 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
         }
     }
 
-    /// How this Mac compares to the M4 Pro behind `Costs`: 1 is as fast, 2 takes twice as long. `embedding` for the
-    /// model's work (matrix multiplies on the GPU), `ocr` for Vision's text recognition. `kinds`, when there: each of
-    /// `Costs`' fields as it compares, measured with the model itself (Linux and Windows, `digup speed --model`), in
-    /// place of the other two. `device`, where there's a GPU: "gpu" or "cpu", whichever ran the model faster here (a
-    /// weak integrated GPU can be slower than the processor it sits in); the helpers then run on it. `checks`: how many
-    /// times the model was timed here; `doubtful`: the last time was at a bad moment (its best try wasn't seen twice),
-    /// so it's timed again at the next start.
+    /// How this Mac compares to the M4 Pro behind `Costs`: 1 is as fast, 2 takes twice as long.
+    /// Metal measures embedding work; Vision measures screenshot text recognition.
     public struct Speed: Codable, Sendable, Equatable {
         public var embedding: Double
         public var ocr: Double
-        public var kinds: [String: Double]?
-        public var device: String?
-        public var checks: Int?
-        public var doubtful: Bool?
 
-        public init(embedding: Double, ocr: Double, kinds: [String: Double]? = nil, device: String? = nil) {
+        public init(embedding: Double, ocr: Double) {
             self.embedding = embedding
             self.ocr = ocr
-            self.kinds = kinds
-            self.device = device
         }
     }
 
@@ -85,10 +74,8 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
         return costs
     }
 
-    /// How indexing here compares with what was expected of it: its measured cost over the expected one, over the kinds
-    /// with enough measured (weighted by their seconds). Nil before any kind has enough. A speed check timed at a bad
-    /// moment took one PC (an RTX 4050 laptop) for 30 times slower than its indexing went: this puts its other kinds
-    /// right too, as indexing measures some of them.
+    /// Measured costs relative to the initial estimate, weighted by time spent on each kind.
+    /// As indexing learns this Mac's pace, estimates for unmeasured kinds improve too.
     public var pace: Double? {
         let expected = expected
         var sum = 0.0, weights = 0.0
@@ -104,12 +91,7 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
     /// The fixed costs as fast as `speed` says.
     var expected: Costs {
         var costs = Costs()
-        if let kinds = speed?.kinds {
-            // A PC's processor can be fifty times slower than the M4 Pro's GPU.
-            for field in Self.fields {
-                costs[keyPath: field.cost] *= min(500, max(0.1, kinds[field.name] ?? 1))
-            }
-        } else if let speed {
+        if let speed {
             let embedding = min(10, max(0.25, speed.embedding)), ocr = min(10, max(0.25, speed.ocr))
             costs.image *= embedding
             costs.screenshot *= max(embedding, ocr)   // OCR runs beside the model and usually sets the pace
@@ -141,13 +123,11 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
 
     private static let lock = NSLock()
 
-    /// Saves this machine's speed (`Speed.measure`) beside what's measured in `folder`, and forgets what indexing
-    /// measured if asked (the model moved from the GPU to the processor, or back).
-    public static func setSpeed(_ speed: Speed, in folder: URL, forgetTallies: Bool = false) {
+    /// Saves the Metal/Vision speed check alongside measured indexing costs.
+    public static func setSpeed(_ speed: Speed, in folder: URL) {
         lock.withLock {
             var saved = load(from: folder)
             saved.speed = speed
-            if forgetTallies { saved.tallies = [:] }
             saved.save(to: folder)
         }
     }
