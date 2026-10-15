@@ -81,11 +81,42 @@ FTS coverage/snippet reads are part of the new ranking phase, so phase boundarie
 compare end-to-end search times for speedup claims.
 
 The macOS workflow runs the native comparison and uploads `before.json`, `after.json` and `summary.json` as the
-`search-profile-macos-arm64` artifact. Raw VPS reports are versioned under `benchmarks/results/`; they use actual Swift
+`search-profile-macos-arm64` artifact. Native and VPS reports are versioned under `benchmarks/results/`; VPS reports use actual Swift
 search and SQLite code with a temporary CPU vector-math adapter instead of Apple's Accelerate and are separate from
 native Mac measurements. Regression tests include 160 old/new hit-field comparisons in the VPS validation harness,
 multilingual keyword tests, bounded SQL batches, deep filtered results, local/external writes, idle cache release,
 code line targets, and window filter reuse/cancellation tests.
+
+## Native Mac measurements
+
+Measured in [the successful macOS CI run](https://github.com/manasseh-fikadu/DigUp-Mac/actions/runs/38768848550)
+on October 15, 2026, using release builds and Apple's Accelerate backend. The arm64 runner reported macOS 26.6.2,
+three processors and 7 GiB physical memory. The baseline is `0f0bd5f`; the optimized revision is `32d9146`.
+Raw timings, phase measurements, memory high-water marks and revision IDs are saved in
+[`benchmarks/results/macos-arm64-32d9146`](../benchmarks/results/macos-arm64-32d9146/).
+
+A first-time cycle through all six kind filters, p50/p95 milliseconds:
+
+| Vectors | Before p50 | After p50 | Before p95 | After p95 | Vector scans | Prepared statements |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 258.20 | 75.68 | 362.61 | 115.02 | 11 → 1 | 2687 → 28 |
+| 50,000 | 1276.69 | 451.19 | 1542.56 | 615.67 | 11 → 1 | 2717 → 28 |
+| 100,000 | 2570.53 | 645.41 | 3145.70 | 945.39 | 11 → 1 | 2717 → 28 |
+
+At 100,000 vectors, a distinct-query window update changed from 479.97 to 302.40 ms p50 and from 494 to 10 prepared
+statements. Revisiting the six cached filters changed from 2450.52 to 0.45 ms p50, with no new vector scans and six
+revision-check statements. These figures measure the engine with precomputed query vectors, excluding model encoding
+and UI work; filter-cache results apply only while that query remains cached.
+
+Batching did not improve every workload. The 100,000-file keyword-only case changed from 309.69 to 319.24 ms p50
+and from 341.90 to 434.79 ms p95, despite reducing prepares from 414 to 10. Common-word FTS coverage/snippet reads
+remain expensive: the optimized distinct-query run averaged 81.06 ms in initial keyword selection and 184.39 ms in
+ranking, which includes those additional FTS reads, versus 27.67 ms in vector scanning. This makes common-word FTS
+work the next optimization target for this fixture; fewer statements alone are not evidence of lower latency.
+
+The same CI run passed 114 tests across 15 suites, built the release app and verified its bundle signature. Model
+reference tests still require the optional local model files described below. This run does not replace Instruments
+profiling of a real library, model startup, interactive rendering or simultaneous indexing.
 
 ## VPS measurements
 
@@ -98,12 +129,13 @@ A first-time cycle through all six kind filters, p50/p95 milliseconds:
 
 | Vectors | Before p50 | After p50 | Before p95 | After p95 | Vector scans | Prepared statements |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10,000 | 584.55 | 149.57 | 603.34 | 177.23 | 11 → 1 | 2687 → 28 |
-| 50,000 | 2359.98 | 472.69 | 2421.46 | 492.71 | 11 → 1 | 2717 → 28 |
-| 100,000 | 4486.44 | 876.76 | 4583.60 | 925.84 | 11 → 1 | 2717 → 28 |
+| 10,000 | 584.55 | 149.02 | 603.34 | 166.31 | 11 → 1 | 2687 → 28 |
+| 50,000 | 2359.98 | 476.62 | 2421.46 | 490.35 | 11 → 1 | 2717 → 28 |
+| 100,000 | 4486.44 | 872.04 | 4583.60 | 890.28 | 11 → 1 | 2717 → 28 |
 
 At 100,000 vectors, a distinct-query window update (all-kind counts plus a filtered page) changed from
-808.55 to 499.66 ms p50, and from 494 to 10 prepared statements. A repeated six-filter cycle changed from 4513.40 to 0.87 ms p50 with no new vector scans and six revision-check statements. Repeated-page timings are sensitive to shared-VPS
+808.55 to 493.96 ms p50, and from 494 to 10 prepared statements. A repeated six-filter cycle changed from 4513.40 to 0.89 ms p50
+with no new vector scans and six revision-check statements. Repeated-page timings are sensitive to shared-VPS
 scheduling; use the native comparison on your own Mac for decisions about user-visible latency.
 
 The remaining distinct-query costs include the full vector matrix scan/conversion and FTS ranking over common words.
@@ -141,4 +173,4 @@ Use `scripts/dev-run.sh` so measurement runs have isolated defaults and indexes.
 
 For timing, use the existing `app.log` search timestamps. Keep p50 and p95 from a fixed query set, the index file/segment
 counts, cold/warm status, peak app/helper footprint and CPU/energy observations. Compare with a clean checkout of the
-previous revision. Do not report speed or bundle-size improvements until these measurements exist.
+previous revision. Keep engine-only benchmark gains separate from total app latency and bundle-size claims.

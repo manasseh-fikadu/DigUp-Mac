@@ -1,0 +1,186 @@
+{
+  "beforeRevision": "0f0bd5f9a1c9773af3aa77c537fdf99b0eeb8eb9",
+  "afterRevision": "32d9146cd6fe94af9911e297c46496d01c13e3eb",
+  "datasets": [
+    {
+      "vectors": 10000,
+      "scenarios": {
+        "firstSearch": {
+          "beforeP50Milliseconds": 55.31625,
+          "afterP50Milliseconds": 30.628167,
+          "beforeP95Milliseconds": 55.31625,
+          "afterP95Milliseconds": 30.628167,
+          "p50Speedup": 1.8060581294336024,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "distinctQueries": {
+          "beforeP50Milliseconds": 49.837916,
+          "afterP50Milliseconds": 28.851042,
+          "beforeP95Milliseconds": 67.644458,
+          "afterP95Milliseconds": 37.868625,
+          "p50Speedup": 1.7274216993618463,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "sixFilterCycle": {
+          "beforeP50Milliseconds": 258.204666,
+          "afterP50Milliseconds": 75.677333,
+          "beforeP95Milliseconds": 362.608917,
+          "afterP95Milliseconds": 115.021666,
+          "p50Speedup": 3.4119155071175666,
+          "beforeStatements": 2687,
+          "afterStatements": 28,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 1
+        },
+        "repeatedFilterCycle": {
+          "beforeP50Milliseconds": 309.789334,
+          "afterP50Milliseconds": 5.651875,
+          "beforeP95Milliseconds": 413.783834,
+          "afterP95Milliseconds": 6.942667,
+          "p50Speedup": 54.81178086918057,
+          "beforeStatements": 2687,
+          "afterStatements": 6,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 0
+        },
+        "keywordPage": {
+          "beforeP50Milliseconds": 40.53775,
+          "afterP50Milliseconds": 25.525792,
+          "beforeP95Milliseconds": 51.679542,
+          "afterP95Milliseconds": 36.874417,
+          "p50Speedup": 1.588109391473534,
+          "beforeStatements": 414,
+          "afterStatements": 10,
+          "beforeVectorScans": 0,
+          "afterVectorScans": 0
+        }
+      }
+    },
+    {
+      "vectors": 50000,
+      "scenarios": {
+        "firstSearch": {
+          "beforeP50Milliseconds": 267.872584,
+          "afterP50Milliseconds": 151.860459,
+          "beforeP95Milliseconds": 267.872584,
+          "afterP95Milliseconds": 151.860459,
+          "p50Speedup": 1.7639389855920298,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "distinctQueries": {
+          "beforeP50Milliseconds": 253.752292,
+          "afterP50Milliseconds": 179.293292,
+          "beforeP95Milliseconds": 290.557875,
+          "afterP95Milliseconds": 205.425125,
+          "p50Speedup": 1.4152916105751463,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "sixFilterCycle": {
+          "beforeP50Milliseconds": 1276.692958,
+          "afterP50Milliseconds": 451.188292,
+          "beforeP95Milliseconds": 1542.560208,
+          "afterP95Milliseconds": 615.669208,
+          "p50Speedup": 2.8296234202814823,
+          "beforeStatements": 2717,
+          "afterStatements": 28,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 1
+        },
+        "repeatedFilterCycle": {
+          "beforeP50Milliseconds": 1230.658084,
+          "afterP50Milliseconds": 2.044667,
+          "beforeP95Milliseconds": 1465.390291,
+          "afterP95Milliseconds": 12.192292,
+          "p50Speedup": 601.8868030833382,
+          "beforeStatements": 2717,
+          "afterStatements": 6,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 0
+        },
+        "keywordPage": {
+          "beforeP50Milliseconds": 189.897459,
+          "afterP50Milliseconds": 151.962417,
+          "beforeP95Milliseconds": 225.605208,
+          "afterP95Milliseconds": 209.376208,
+          "p50Speedup": 1.2496343684767794,
+          "beforeStatements": 414,
+          "afterStatements": 10,
+          "beforeVectorScans": 0,
+          "afterVectorScans": 0
+        }
+      }
+    },
+    {
+      "vectors": 100000,
+      "scenarios": {
+        "firstSearch": {
+          "beforeP50Milliseconds": 477.260833,
+          "afterP50Milliseconds": 375.462875,
+          "beforeP95Milliseconds": 477.260833,
+          "afterP95Milliseconds": 375.462875,
+          "p50Speedup": 1.2711265607818083,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "distinctQueries": {
+          "beforeP50Milliseconds": 479.96825,
+          "afterP50Milliseconds": 302.395666,
+          "beforeP95Milliseconds": 643.627667,
+          "afterP95Milliseconds": 417.909792,
+          "p50Speedup": 1.587219341959749,
+          "beforeStatements": 494,
+          "afterStatements": 10,
+          "beforeVectorScans": 2,
+          "afterVectorScans": 1
+        },
+        "sixFilterCycle": {
+          "beforeP50Milliseconds": 2570.525875,
+          "afterP50Milliseconds": 645.405,
+          "beforeP95Milliseconds": 3145.704167,
+          "afterP95Milliseconds": 945.389417,
+          "p50Speedup": 3.9828105995460215,
+          "beforeStatements": 2717,
+          "afterStatements": 28,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 1
+        },
+        "repeatedFilterCycle": {
+          "beforeP50Milliseconds": 2450.516958,
+          "afterP50Milliseconds": 0.449667,
+          "beforeP95Milliseconds": 3952.803625,
+          "afterP95Milliseconds": 0.964917,
+          "p50Speedup": 5449.625963212778,
+          "beforeStatements": 2717,
+          "afterStatements": 6,
+          "beforeVectorScans": 11,
+          "afterVectorScans": 0
+        },
+        "keywordPage": {
+          "beforeP50Milliseconds": 309.693166,
+          "afterP50Milliseconds": 319.236917,
+          "beforeP95Milliseconds": 341.899125,
+          "afterP95Milliseconds": 434.793125,
+          "p50Speedup": 0.9701044882600467,
+          "beforeStatements": 414,
+          "afterStatements": 10,
+          "beforeVectorScans": 0,
+          "afterVectorScans": 0
+        }
+      }
+    }
+  ]
+}
